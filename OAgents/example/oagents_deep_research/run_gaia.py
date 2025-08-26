@@ -16,6 +16,9 @@
 # Portions of this file are modifications by OPPO PersonalAI Team.
 # Licensed under the Apache License, Version 2.0.
 
+# Bash Script
+# python -c "import sys; print('\n'.join(sys.path))"
+
 import argparse
 import json
 import os
@@ -87,7 +90,7 @@ AUTHORIZED_IMPORTS = [
 ]
 
 
-parent_dir = os.path.dirname(os.path.dirname(os.getcwd()))
+parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.getcwd())))
 env_path = os.path.join(parent_dir, '.env')
 
 load_dotenv(dotenv_path=env_path, override=True)
@@ -103,8 +106,8 @@ custom_role_conversions = {"tool-call": "assistant", "tool-response": "user"}
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--concurrency", type=int, default=1)
-    parser.add_argument("--model_id", type=str, default="gpt-4.1")
-    parser.add_argument("--model_id_search", type=str, default="gpt-4.1")
+    parser.add_argument("--model_id", type=str, default="gpt-5")
+    parser.add_argument("--model_id_search", type=str, default="gpt-5")
     parser.add_argument("--run_name", type=str, default="init_run")
     parser.add_argument("--debug", default=False, action="store_true")
     # infer params
@@ -115,7 +118,7 @@ def parse_args():
     parser.add_argument('--reflection', action='store_true', default=False, help='Enable reflection')
     # data selection
     parser.add_argument("--split", type=str, default="validation", choices=['validation','test'])
-    parser.add_argument("--level", type=str, default="all", choices=["all", "1", "2", "3"])
+    parser.add_argument("--level", type=str, default="1", choices=["all", "1", "2", "3"])
     parser.add_argument("--selected-tasks", default=None, nargs='*', help="Tasks to run: specify single or multiple indices (--selected-tasks 1 or --selected-tasks 1 2 5), a single task ID, or a path to a text file with one task ID per line")
     # search params
     parser.add_argument('--search_tool_reflection', action='store_true', default=False, help='Enable search tool reflection')
@@ -328,11 +331,14 @@ Here is the task:
 def get_examples_to_answer(answers_file, eval_df, selected_tasks=None, level='all', debug=False) -> List[dict]:
     logger.info(f"Loading answers from {answers_file}...")
     try:
-        answer_df = pd.read_json(answers_file, lines=True)
-        done_questions = answer_df.get("task_id", []).tolist()
-        logger.info(f"Found {len(done_questions)} previous results!")
+        if os.path.exists(answers_file):
+            answer_df = pd.read_json(answers_file, lines=True)
+            done_questions = answer_df.get("task_id", []).tolist()
+            logger.info(f"Found {len(done_questions)} previous results!")
+        else:
+            done_questions = []
     except Exception as e:
-        logger.info("Error when loading records: ", e)
+        logger.info(f"Error when loading records: {e}")
         logger.info("No usable records! ▶️ Starting new.")
         done_questions = []
 

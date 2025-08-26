@@ -855,7 +855,7 @@ class OpenAIServerModel(Model):
 
     @staticmethod
     def truncate_content_based_on_stop_sequences(content: str, stop_sequences: List[str]) -> str:
-        if not stop_sequences:
+        if not stop_sequences or content is None:
             return content
         for stop_seq in stop_sequences:
             index = content.find(stop_seq)
@@ -882,8 +882,18 @@ class OpenAIServerModel(Model):
             **kwargs,
         )
 
-        # Check if model_id contains 'o3' or 'o4'
-        if 'o3' in self.model_id.lower() or 'o4' in self.model_id.lower():
+        # Handle GPT-5 specific parameters
+        if 'gpt-5' in self.model_id.lower():
+            # Convert max_tokens to max_completion_tokens for GPT-5
+            if 'max_tokens' in completion_kwargs:
+                completion_kwargs['max_completion_tokens'] = completion_kwargs.pop('max_tokens')
+            
+            # Add reasoning_effort parameter if not provided
+            if 'reasoning_effort' not in completion_kwargs:
+                completion_kwargs['reasoning_effort'] = 'minimal'
+
+        # Check if model_id contains 'o3', 'o4', or 'gpt-5'
+        if any(model in self.model_id.lower() for model in ['o3', 'o4', 'gpt-5']):
             # Remove stop_sequences from completion_kwargs
             completion_kwargs.pop('stop', None)
 
@@ -911,15 +921,15 @@ class OpenAIServerModel(Model):
                 if sys_fp and sys_fp.strip().lower() in  ['fp_ee1d74bde0', 'fp_3dfb47c1f3']:
                     logger.warning("Warning! The response might be sent from Azure backend.")
 
-                # If model_id contains 'o3' or 'o4', manually truncate content based on stop_sequences
-                if 'o3' in self.model_id.lower() or 'o4' in self.model_id.lower():
+                # If model_id contains 'o3', 'o4', or 'gpt-5', manually truncate content based on stop_sequences
+                if any(model in self.model_id.lower() for model in ['o3', 'o4', 'gpt-5']):
                     message.content = self.truncate_content_based_on_stop_sequences(message.content, stop_sequences)
 
                 if tools_to_call_from is not None:
                     return parse_tool_args_if_needed(message)
                 return message
             except BadRequestError as e:
-                logger.error("Bad Request Error:", e)
+                logger.error(f"Bad Request Error: {e}")
                 raise
             except APIConnectionError as e:
                 if attempt < max_retries:
@@ -1268,7 +1278,7 @@ class FakeToolCallOpenAIServerModel(Model):
 
                 return message
             except BadRequestError as e:
-                logger.error("Bad Request Error:", e)
+                logger.error(f"Bad Request Error: {e}")
                 empty_message.raw = e.response
                 break
             except APIConnectionError as e:

@@ -848,6 +848,50 @@ def evaluate_listcomp(
     return inner_evaluate(listcomp.generators, 0, state)
 
 
+def evaluate_setcomp(
+    setcomp: ast.SetComp,
+    state: Dict[str, Any],
+    static_tools: Dict[str, Callable],
+    custom_tools: Dict[str, Callable],
+    authorized_imports: List[str],
+) -> set:
+    def inner_evaluate(generators: List[ast.comprehension], index: int, current_state: Dict[str, Any]) -> List[Any]:
+        if index >= len(generators):
+            return [
+                evaluate_ast(
+                    setcomp.elt,
+                    current_state,
+                    static_tools,
+                    custom_tools,
+                    authorized_imports,
+                )
+            ]
+        generator = generators[index]
+        iter_value = evaluate_ast(
+            generator.iter,
+            current_state,
+            static_tools,
+            custom_tools,
+            authorized_imports,
+        )
+        result = []
+        for value in iter_value:
+            new_state = current_state.copy()
+            if isinstance(generator.target, ast.Tuple):
+                for idx, elem in enumerate(generator.target.elts):
+                    new_state[elem.id] = value[idx]
+            else:
+                new_state[generator.target.id] = value
+            if all(
+                evaluate_ast(if_clause, new_state, static_tools, custom_tools, authorized_imports)
+                for if_clause in generator.ifs
+            ):
+                result.extend(inner_evaluate(generators, index + 1, new_state))
+        return result
+
+    return set(inner_evaluate(setcomp.generators, 0, state))
+
+
 def evaluate_try(
     try_node: ast.Try,
     state: Dict[str, Any],
@@ -1199,6 +1243,8 @@ def evaluate_ast(
         )
     elif isinstance(expression, (ast.ListComp, ast.GeneratorExp)):
         return evaluate_listcomp(expression, state, static_tools, custom_tools, authorized_imports)
+    elif isinstance(expression, ast.SetComp):
+        return evaluate_setcomp(expression, state, static_tools, custom_tools, authorized_imports)
     elif isinstance(expression, ast.UnaryOp):
         return evaluate_unaryop(expression, state, static_tools, custom_tools, authorized_imports)
     elif isinstance(expression, ast.Starred):
