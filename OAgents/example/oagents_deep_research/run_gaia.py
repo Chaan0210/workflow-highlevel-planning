@@ -16,12 +16,10 @@
 # Portions of this file are modifications by OPPO PersonalAI Team.
 # Licensed under the Apache License, Version 2.0.
 
-# Bash Script
-# python -c "import sys; print('\n'.join(sys.path))"
-
 import argparse
 import json
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -58,6 +56,7 @@ from oagents import (
     ToolCallingAgent,
 )
 
+# 허용된 Python 라이브러리(CodeAgent가 코드 실행 시 사용할 수 있는 안전한 라이브러리 목록)
 AUTHORIZED_IMPORTS = [
     "requests",
     "zipfile",
@@ -86,7 +85,9 @@ AUTHORIZED_IMPORTS = [
     "random",
     "re",
     "sys",
-    "shutil"
+    "shutil",
+    "builtins",
+    "pprint"
 ]
 
 
@@ -103,6 +104,8 @@ jsonl_lock = threading.Lock()
 logger.warning("Make sure you deactivated Tailscale VPN, else some URLs will be blocked!")
 custom_role_conversions = {"tool-call": "assistant", "tool-response": "user"}
 
+
+# parsing arguments
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--concurrency", type=int, default=1)
@@ -133,24 +136,47 @@ def parse_args():
     
     return parser.parse_args()
 
+# GAIA dataset loading
+# def load_gaia_dataset(args):
+#     eval_ds = datasets.load_dataset("gaia-benchmark/GAIA", "2023_all", trust_remote_code=True)[args.split]
+#     eval_ds = eval_ds.rename_columns({"Question": "question", "Final answer": "true_answer", "Level": "task"})
+
+#     def preprocess_file_paths(row):
+#         if len(row["file_name"]) > 0:
+#             row["file_name"] = f"data/gaia/{args.split}/" + row["file_name"]
+#         return row
+
+#     eval_ds = eval_ds.map(preprocess_file_paths)
+#     eval_df = pd.DataFrame(eval_ds)
+#     return eval_df
+
 def load_gaia_dataset(args):
-    eval_ds = datasets.load_dataset("gaia-benchmark/GAIA", "2023_all", trust_remote_code=True)[args.split]
-    eval_ds = eval_ds.rename_columns({"Question": "question", "Final answer": "true_answer", "Level": "task"})
+    metadata_path = f"data/gaia/{args.split}/metadata.jsonl"
+
+    data = []
+    with open(metadata_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line:  # Skip empty lines
+                data.append(json.loads(line))
+
+    eval_df = pd.DataFrame(data)
+    eval_df = eval_df.rename(columns={"Question": "question", "Final answer": "true_answer", "Level": "task"})
 
     def preprocess_file_paths(row):
-        if len(row["file_name"]) > 0:
+        if row.get("file_name", "") and len(row["file_name"]) > 0:
             row["file_name"] = f"data/gaia/{args.split}/" + row["file_name"]
         return row
 
-    eval_ds = eval_ds.map(preprocess_file_paths)
-    eval_df = pd.DataFrame(eval_ds)
+    eval_df = eval_df.apply(preprocess_file_paths, axis=1)
     return eval_df
 
+# Agent 계층 구조 생성
 def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False):
     crawler = SimpleCrawler(serpapi_key=os.getenv("SERP_API_KEY"))
-    text_limit = 100000
+    text_limit = 200000
 
-    search_types = ['wiki', 'google', 'baidu', 'bing', 'duckduckgo']
+    search_types = ['wiki', 'google', 'bing', 'baidu', 'duckduckgo']
     search_tools = [SearchTool(search_type=st, reflection=args.search_tool_reflection) for st in search_types]
     
     WEB_TOOLS = [
@@ -160,6 +186,7 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
     ]
     WEB_TOOLS += search_tools
 
+    # Search Agent 생성
     text_webbrowser_agent = ToolCallingAgent(
         model=model_search,
         tools=WEB_TOOLS,
@@ -182,6 +209,8 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
     text_webbrowser_agent.prompt_templates["managed_agent"]["task"] += """You can navigate to .txt online files.
     If a non-html page is in another format, especially .pdf or a Youtube video, use tool 'inspect_file_as_text' to inspect it.
     Additionally, if after some searching you find out that you need more information to answer the question, you can use `final_answer` with your request for clarification as argument to request for more information."""
+    
+    # Manager Agent 생성
     manager_agent = CodeAgent(
         model=model,
         tools=[VisualInspectorTool(model, text_limit), AudioInspectorTool(model, text_limit), TextInspectorTool(model, text_limit)],
@@ -189,7 +218,7 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
         verbosity_level=2,
         additional_authorized_imports=AUTHORIZED_IMPORTS,
         planning_interval=args.planning_interval,
-        managed_agents=[text_webbrowser_agent],
+        managed_agents=[text_webbrowser_agent], # 하위 Agent 관리
         debug=debug,
         subtask=args.subtask,
         static_plan=args.static_plan,
@@ -211,6 +240,7 @@ def append_answer(entry: dict, jsonl_file: str, file_lock) -> None:
     assert os.path.exists(jsonl_file), "File not found!"
     logger.info("Answer exported to file: {}".format(jsonl_file.resolve()))
 
+# 메모리 단계 추출(에이전트의 추론 과정을 단계별로 기록, action/task/planning 단계 구분해서 저장)
 def extract_intermediate_steps(agent):
 
     intermediate_steps = []
@@ -231,8 +261,10 @@ def extract_intermediate_steps(agent):
         intermediate_steps.append(step_dict)
     return intermediate_steps
 
+# 단일 질문 처리 프로세스
 def answer_single_question(example, args, model_id, model_id_search, answers_file, debug=False, retrieval=False):
 
+    # 메인 모델과 검색 모델 분리
     text_limit = 100000
     model_name, key, url, model_wrapper = get_api_model(model_id)
     model_name_search, key_search, url_search, model_wrapper_search = get_api_model(model_id_search)
@@ -264,6 +296,7 @@ def answer_single_question(example, args, model_id, model_id_search, answers_fil
 
     agent = create_agent_hierarchy(model, model_search, args, debug)
 
+    # 질문 증강
     augmented_question = """You have one question to answer. It is paramount that you provide a correct answer.
 Give it all you can: I know for a fact that you have access to all the relevant tools to solve it and find the correct answer (the answer does exist). 
 Failure or 'I cannot answer' or 'None found' will not be tolerated, success will be rewarded.
@@ -271,6 +304,7 @@ Run verification steps if that's needed, you must make sure you find the correct
 Here is the task:
 """ + example["question"]
 
+    # 첨부파일 있으면 파일 설명 추가
     if example["file_name"]:
         if ".zip" in example["file_name"]:
             prompt_use_files = "\n\nTo solve the task above, you will have to use these attached files:\n"
@@ -286,21 +320,64 @@ Here is the task:
 
     start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
+        logger.info(f"🚀 Starting task: {example['task_id']}")
+        logger.info(f"📝 Question: {example['question'][:100]}...")
+        
+        # Agent 실행
         final_result = agent.run(augmented_question)
-        agent_memory = agent.write_memory_to_messages(summary_mode=True)
-        final_result = prepare_response(augmented_question, agent_memory, reformulation_model=model)
-        output = str(final_result)
 
+        # 메모리 요약
+        agent_memory = agent.write_memory_to_messages(summary_mode=True)
+        
+        # 중간 단계 추출 및 로깅
         intermediate_steps = extract_intermediate_steps(agent)
         
+        # Planning 결과 로깅
+        planning_steps = [step for step in intermediate_steps if step.get('step_type') == 'planning']
+        for i, planning_step in enumerate(planning_steps, 1):
+            logger.info(f"📋 Planning Step {i}:")
+            if 'plan' in planning_step:
+                plan_content = planning_step['plan']
+                logger.info(f"   Plan Content (first 500 chars): {plan_content[:500]}...")
+                
+                # DAG 구조가 있으면 특별히 로깅
+                if '##DAG_LIST' in plan_content and '##PARALLEL_LIST' in plan_content:
+                    logger.info("   🔗 DAG-based subtask planning detected!")
+                    
+                    # DAG_LIST 추출
+                    dag_match = re.search(r'##DAG_LIST\n(.*?)(?=##|\Z)', plan_content, re.DOTALL)
+                    if dag_match:
+                        logger.info(f"   DAG Dependencies: {dag_match.group(1).strip()}")
+                    
+                    # PARALLEL_LIST 추출
+                    parallel_match = re.search(r'##PARALLEL_LIST\n([^\n#]+)', plan_content)
+                    if parallel_match:
+                        logger.info(f"   Parallel Tasks: {parallel_match.group(1).strip()}")
+        
+        # Action 단계 요약 로깅
+        action_steps = [step for step in intermediate_steps if step.get('step_type') == 'action']
+        logger.info(f"🔧 Total Action Steps: {len(action_steps)}")
+        
+        # Task 단계 요약 로깅
+        task_steps = [step for step in intermediate_steps if step.get('step_type') == 'task']  
+        logger.info(f"📋 Total Task Steps: {len(task_steps)}")
+
+        # 응답 재구성
+        final_result = prepare_response(augmented_question, agent_memory, reformulation_model=model)
+        output = str(final_result)
+        
+        logger.info(f"✅ Final Answer: {output[:200]}..." if len(output) > 200 else f"✅ Final Answer: {output}")
+
         intermediate_steps_check = [str(step) for step in agent.memory.steps]
         parsing_error = True if any(["AgentParsingError" in step for step in intermediate_steps_check]) else False
         
         iteration_limit_exceeded = True if "Agent stopped due to iteration limit or time limit." in output else False
         raised_exception = False
+        
+        logger.info(f"⏱️  Task {example['task_id']} completed successfully")
 
     except Exception as e:
-        logger.error(f"Error on task {example['task_id']}\n{e}")
+        logger.error(f"❌ Error on task {example['task_id']}: {str(e)}")
         output = None
         intermediate_steps = []
         parsing_error = False
@@ -309,6 +386,7 @@ Here is the task:
         raised_exception = True
         
     end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 결과 저장 구조
     annotated_example = {
         "agent_name": model.model_id,
         "question": example["question"],

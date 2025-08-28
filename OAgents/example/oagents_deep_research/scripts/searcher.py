@@ -301,8 +301,12 @@ dictionaries, each representing a search result."""
         if source == "text":
             try:
                 results = ddgs.text(keywords=query, max_results=self.max_results)
-            except RequestException as e:
-                responses.append({"error": f"duckduckgo search failed.{e}"})
+            except (RequestException, Exception) as e:
+                error_msg = f"duckduckgo search failed: {e}"
+                if "202" in str(e) or "rate" in str(e).lower():
+                    error_msg += " (Rate limited - try using a different search engine)"
+                responses.append({"error": error_msg})
+                return responses
 
             # Iterate over results found
             for i, result in enumerate(results, start=1):
@@ -320,8 +324,12 @@ dictionaries, each representing a search result."""
         elif source == "images":
             try:
                 results = ddgs.images(keywords=query, max_results=self.max_results)
-            except RequestException as e:
-                responses.append({"error": f"duckduckgo search failed.{e}"})
+            except (RequestException, Exception) as e:
+                error_msg = f"duckduckgo image search failed: {e}"
+                if "202" in str(e) or "rate" in str(e).lower():
+                    error_msg += " (Rate limited - try using a different search engine)"
+                responses.append({"error": error_msg})
+                return responses
 
             for i, result in enumerate(results, start=1):
                 response = {
@@ -336,8 +344,12 @@ dictionaries, each representing a search result."""
         elif source == "videos":
             try:
                 results = ddgs.videos(keywords=query, max_results=self.max_results)
-            except RequestException as e:
-                responses.append({"error": f"duckduckgo search failed.{e}"})
+            except (RequestException, Exception) as e:
+                error_msg = f"duckduckgo video search failed: {e}"
+                if "202" in str(e) or "rate" in str(e).lower():
+                    error_msg += " (Rate limited - try using a different search engine)"
+                responses.append({"error": error_msg})
+                return responses
 
             for i, result in enumerate(results, start=1):
                 response = {

@@ -51,8 +51,8 @@ def process_selected_tasks_param(tasks_param):
 
 def prepare_model_kwargs(model_id, args):
     kwargs = {}
-    if 'o1' in model_id or 'o3' in model_id or 'o4' in model_id:
-        kwargs["reasoning_effort"] = "high"
+    if 'o1' in model_id or 'o3' in model_id or 'o4' in model_id or 'gpt-5' in model_id:
+        kwargs["reasoning_effort"] = "low"
     if args.temperature:
         kwargs["temperature"] = args.temperature
     if args.top_p:

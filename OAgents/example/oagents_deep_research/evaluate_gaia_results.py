@@ -3,9 +3,7 @@ import pandas as pd
 from scripts.gaia_scorer import question_scorer, check_close_call
 from pathlib import Path
 
-def evaluate_results(jsonl_file):
-    """JSONL 결과 파일을 평가하여 정확도와 상세 분석 제공"""
-    
+def evaluate_results(jsonl_file):    
     if not Path(jsonl_file).exists():
         print(f"Error: File {jsonl_file} not found!")
         return
