@@ -17,6 +17,7 @@
 # Licensed under the Apache License, Version 2.0.
 
 import importlib
+import importlib.resources
 import inspect
 import json
 import os
@@ -30,7 +31,6 @@ from logging import getLogger
 from pathlib import Path
 from typing import Any, Callable, Dict, Generator, List, Optional, Set, Tuple, TypedDict, Union
 import heapq
-from collections import deque
 import jinja2
 import yaml
 from huggingface_hub import create_repo, metadata_update, snapshot_download, upload_folder
@@ -295,7 +295,7 @@ class MultiStepAgent:
         self.n_rollouts = n_rollouts
         self.reflection_threshold = reflection_threshold
         self.verify_type = verify_type
-        self.result_merging_type = result_merging_type,
+        self.result_merging_type = result_merging_type
         # tts prompts
         self.ORM_prompt = ""
         self.PRM_prompt = ""
@@ -768,7 +768,7 @@ class MultiStepAgent:
 
     def _create_dynamic_output(self, input_messages, facts_msg, plan_msg, is_first_step):
         plan_content = self.workflow.__str__() if not is_first_step else plan_msg.content
-        final_plan = self._format_plan_output(plan_content, is_first_step)
+        final_plan = self._format_plan_output(plan_content, is_first_step, task=self.task)
         final_facts = self._format_facts_output(facts_msg.content, is_first_step)
         
         self.logger.log(
@@ -785,20 +785,22 @@ class MultiStepAgent:
             model_output_message_facts=facts_msg,
         )
 
-    def _format_plan_output(self, content, is_first_step):
-        template = """Here is the plan of action that I will follow to solve the task:
-        ```
-        {content}
-        ```""" if is_first_step else """I still need to solve the task I was given:
-        ```
-        {task}
-        ```
-        
-        Here is my new/updated plan of action to solve the task:
-        ```
-        {content}
-        ```"""
-        return textwrap.dedent(template.format(content=content))
+    def _format_plan_output(self, content, is_first_step, task: Optional[str] = None):
+        if is_first_step:
+            template = """Here is the plan of action that I will follow to solve the task:
+            ```
+            {content}
+            ```""" 
+            return textwrap.dedent(template.format(content=content))
+        else:
+            template = """I still need to solve the task{task_line}
+            
+            Here is my new/updated plan of action to solve the task:
+            ```
+            {content}
+            ```"""
+            task_line = f":\n```\n{task}\n```" if task else "."
+            return textwrap.dedent(template.format(content=content, task_line=task_line))
 
     def _format_facts_output(self, content, is_first_step):
         template = "Here are the facts that I know so far:" if is_first_step else "Here is the updated list of the facts that I know:"
@@ -1456,14 +1458,12 @@ class ToolCallingAgent(MultiStepAgent):
 
         if final_answer is None and self.step_number == self.max_steps + 1:
             error_message = "Reached max steps."
-            step_start_time = time.time()
+            final_start = time.time()
             final_answer = self.provide_final_answer(task, images)
-            final_memory_step = ActionStep(
-                step_number=self.step_number, error=AgentMaxStepsError(error_message, self.logger)
-            )
-            final_memory_step.action_output = final_answer
+            final_memory_step = ActionStep(step_number=self.step_number, error=AgentMaxStepsError(error_message, self.logger))
+            final_memory_step.start_time = final_start
             final_memory_step.end_time = time.time()
-            final_memory_step.duration = memory_step.end_time - step_start_time
+            final_memory_step.duration = final_memory_step.end_time - final_start
             self.memory.steps.append(final_memory_step)
 
             _task_info = {
@@ -1630,8 +1630,8 @@ class CodeAgent(MultiStepAgent):
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.api_base = os.getenv("OPENAI_BASE_URL")
         self.client = OpenAI(api_key=self.api_key, base_url=self.api_base)
-        self.texts = []  # 存储原始文本
-        self.embeddings = []  # 存储对应的向量表示
+        self.texts = []
+        self.embeddings = []
         self.long_term_memory=[]
         self.Most_Similar=None
         prompt_templates = prompt_templates or yaml.safe_load(
@@ -1793,23 +1793,20 @@ class CodeAgent(MultiStepAgent):
             raise AgentExecutionError(error_msg, self.logger)
 
     def _parse_plan(self, raw_plan):
-        parallel_section = re.search(r'##PARALLEL_LIST\n([ST\d, ]+)', raw_plan)
+        parallel_section = re.search(r'##PARALLEL_LIST\n([ST\d,\s]+)', raw_plan)
         parallel_list = [x.strip() for x in parallel_section.group(1).split(',')] if parallel_section else []
-        
+
         subtask_dict = {}
-        pattern = r'##(ST\d+)([\s\S]*?)(?=\n##ST|\Z)'
-        
-        for match in re.finditer(pattern, raw_plan):
-            st_code, content = match.groups()
-            content_stripped = content.strip()
-            title_line, _, steps_content = content_stripped.partition('\n')
-            title = title_line.split(':', 1)[-1].strip() if ':' in title_line else title_line.strip()
-            steps = re.findall(r'^\d+\..*$', content_stripped, flags=re.MULTILINE)
-            steps_str = '\n'.join(steps)
-            subtask_dict[st_code] = {
-                "title": title,
-                "steps": steps_str
-            }
+
+        for match in re.finditer(r'##(ST\d+)([^\n]*?)\n([\s\S]*?)(?=\n##ST|\Z)', raw_plan):
+            st_code, header_trailer, body = match.groups()
+            header_trailer = header_trailer.strip()
+
+            title = header_trailer[1:].strip() if header_trailer.startswith(':') else \
+                    re.sub(r'^\[(.*)\]$', r'\1', header_trailer).strip() if header_trailer.startswith('[') else header_trailer
+
+            steps = re.findall(r'^\s*\d+\..*$', body, flags=re.MULTILINE)
+            subtask_dict[st_code] = {"title": title, "steps": '\n'.join(steps)}
         return parallel_list, subtask_dict
     
     def _retrieve_key_memory(self, memory_messages: List[Message]):
@@ -1835,7 +1832,7 @@ class CodeAgent(MultiStepAgent):
 
     def _update_long_term_memory(self, memory_messages: List[Message]):
         if not self.use_long_term_memory or len(memory_messages) <= 1:
-            return
+            return None
 
         prompt = f"""Here is the agent's execution content from the previous step: {memory_messages[-1]}. 
             Here is the long-term memory formed by summarizing the agent's historical execution content: {self.long_term_memory}. 
@@ -1855,6 +1852,7 @@ class CodeAgent(MultiStepAgent):
 
         summary_content = chat_message.content
         self.long_term_memory = summary_content
+        return summary_content
 
     def step(self, memory_step: ActionStep, memory_messages=None, additional_prompt: str = "", memory_steps: List[ActionStep | PlanningStep | TaskStep]=None) -> Union[None, Any]:
         """
@@ -2016,7 +2014,7 @@ class CodeAgent(MultiStepAgent):
                         Message(role=MessageRole.ASSISTANT, content=[{"type": "text", "text": f"This is the most similar historical steps: {self.Most_Similar.strip()}"}])
                     )
                     if self.long_term_memory is not None:
-                        self.long_term_memory.append(
+                        self.input_messages.append(
                             Message(role=MessageRole.ASSISTANT, content=[{"type": "text", "text": f"This is the long-term memory of the agent of this task: {self.long_term_memory.strip()}"}])
                         )
                     chat_message: ChatMessage = self.model(
@@ -2172,6 +2170,7 @@ class CodeAgent(MultiStepAgent):
 
         if self.step_number == self.max_steps + 1:
             error_message = "Reached max steps."
+            start_time = time.time()
             final_answer = self.provide_final_answer(task, images)
 
             final_memory_step = ActionStep(
@@ -2179,7 +2178,9 @@ class CodeAgent(MultiStepAgent):
                 error=AgentMaxStepsError(error_message, self.logger)
             )
             final_memory_step.action_output = final_answer
+            final_memory_step.start_time = start_time
             final_memory_step.end_time = time.time()
+            final_memory_step.duration = final_memory_step.end_time - start_time
 
             self.memory.steps.append(final_memory_step)
 
@@ -2450,11 +2451,12 @@ class CodeAgent(MultiStepAgent):
                 step_info = step.dict()
                 return (
                     f"[ActionStep]\n"
-                    f"  step_number: {step_info['step']}\n"
-                    f"  observations: {step.observations}\n"
-                    f"  action_output: {step_info['action_output']}\n"
-                    f"  model_output: {step_info['model_output']}\n"
-                    f"  error: {step_info['error']}\n"                )
+                    f"  step_number: {getattr(step, 'step_number', None)}\n"
+                    f"  observations: {getattr(step, 'observations', None)}\n"
+                    f"  action_output: {getattr(step, 'action_output', None)}\n"
+                    f"  model_output: {getattr(step, 'model_output', None)}\n"
+                    f"  error: {getattr(step.error, 'message', step.error) if hasattr(step, 'error') else None}\n"
+                )
             elif isinstance(step, TaskStep):
                 return (
                     f"[TaskStep]\n"
