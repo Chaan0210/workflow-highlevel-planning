@@ -86,7 +86,6 @@ AUTHORIZED_IMPORTS = [
     "re",
     "sys",
     "shutil",
-    "builtins",
     "pprint"
 ]
 
@@ -126,8 +125,9 @@ def parse_args():
     # search params
     parser.add_argument('--search_tool_reflection', action='store_true', default=False, help='Enable search tool reflection')
     # plan params
-    parser.add_argument('--subtask', action='store_true', default=False, help='Enable subtask')
     parser.add_argument('--static_plan', action='store_true', default=False, help='Use static plan')
+    parser.add_argument('--subtask', action='store_true', default=False, help='Enable subtask planning/execution')
+    parser.add_argument('--subtask_mode', type=str, default='sections',choices=['sections', 'dag'], help='Subtask execution mode: "sections" = Plan-then-Act(순차), "dag" = Graph(DAG 의존성)')
     parser.add_argument('--dynamic_update_plan', action='store_true', default=False, help='Use dynamic update plan')
     # memory params
     parser.add_argument('--summary', action='store_true', default=False, help='Summarize the current step memory')
@@ -136,7 +136,7 @@ def parse_args():
     
     return parser.parse_args()
 
-# GAIA dataset loading
+
 # def load_gaia_dataset(args):
 #     eval_ds = datasets.load_dataset("gaia-benchmark/GAIA", "2023_all", trust_remote_code=True)[args.split]
 #     eval_ds = eval_ds.rename_columns({"Question": "question", "Final answer": "true_answer", "Level": "task"})
@@ -150,6 +150,7 @@ def parse_args():
 #     eval_df = pd.DataFrame(eval_ds)
 #     return eval_df
 
+# GAIA dataset loading
 def load_gaia_dataset(args):
     metadata_path = f"data/gaia/{args.split}/metadata.jsonl"
 
@@ -221,6 +222,7 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
         managed_agents=[text_webbrowser_agent], # 하위 Agent 관리
         debug=debug,
         subtask=args.subtask,
+        subtask_mode=args.subtask_mode,
         static_plan=args.static_plan,
         dynamic_update_plan=args.dynamic_update_plan,
         reflection=args.reflection,
@@ -423,13 +425,28 @@ def get_examples_to_answer(answers_file, eval_df, selected_tasks=None, level='al
     if level == 'all':
         filtered_df = eval_df
     else:
-        filtered_df = eval_df[eval_df['task'] == level]
+        filtered_df = eval_df[eval_df['task'] == int(level)]
 
     if selected_tasks:
         if isinstance(selected_tasks[0], int):
-            filtered_df = eval_df.iloc[selected_tasks]
+            # When using integer indices, take all available tasks up to the maximum requested index
+            max_requested_index = max(selected_tasks)
+            available_tasks = len(filtered_df)
+
+            if max_requested_index >= available_tasks:
+                # If requested more tasks than available, take all available tasks
+                logger.info(f"Requested indices up to {max_requested_index}, but only {available_tasks} tasks available for level {level}. Using all {available_tasks} tasks.")
+                # Keep all filtered_df as is (no further filtering needed)
+            else:
+                # Filter to only valid indices within the filtered DataFrame
+                valid_indices = [idx for idx in selected_tasks if idx < len(filtered_df)]
+                if valid_indices:
+                    filtered_df = filtered_df.iloc[valid_indices]
+                else:
+                    # If no valid indices, return empty DataFrame with same structure
+                    filtered_df = filtered_df.iloc[0:0]
         else:
-            filtered_df = eval_df[eval_df['task_id'].isin(selected_tasks)]
+            filtered_df = filtered_df[filtered_df['task_id'].isin(selected_tasks)]
     
     if debug:
         done_questions = []

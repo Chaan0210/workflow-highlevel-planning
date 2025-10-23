@@ -365,7 +365,7 @@ class SimpleCrawler:
             'Authorization': f'Bearer {os.getenv("JINA_API_KEY")}',
             'X-Engine': 'browser',
             'X-Return-Format': 'text',
-            'X-Timeout': '10',
+            'X-Timeout': '30',
             'X-Token-Budget': '80000'
         }
         response = requests.get(jina_url, headers=headers)

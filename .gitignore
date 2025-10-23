@@ -145,3 +145,8 @@ tool_output/
 # Claude
 CLAUDE.md
 .claude
+
+# Codex
+AGENTS.md
+
+.ruff_cache

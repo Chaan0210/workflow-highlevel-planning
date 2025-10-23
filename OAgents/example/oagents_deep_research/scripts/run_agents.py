@@ -2,8 +2,12 @@ import json
 import os
 import shutil
 import textwrap
+import zipfile
+import logging
 from pathlib import Path
 from oagents.utils import AgentError
+
+logger = logging.getLogger(__name__)
 
 def serialize_agent_error(obj):
     if isinstance(obj, AgentError):
@@ -60,14 +64,26 @@ def get_single_file_description(file_path: str, question: str, visual_inspection
 def get_zip_description(file_path: str, question: str, visual_inspection_tool, document_inspection_tool, audio_inspection_tool):
     folder_path = file_path.replace(".zip", "")
     os.makedirs(folder_path, exist_ok=True)
-    shutil.unpack_archive(file_path, folder_path)
+
+    try:
+        # First check if it's a valid zip file
+        with zipfile.ZipFile(file_path, 'r') as zip_ref:
+            zip_ref.testzip()  # Test the integrity of the zip file
+
+        # If valid, extract it
+        shutil.unpack_archive(file_path, folder_path)
+
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, Exception) as e:
+        logger.error(f"Failed to process zip file {file_path}: {e}")
+        # If it's not a valid zip file or extraction fails, treat it as a single file
+        return get_single_file_description(file_path, question, visual_inspection_tool, document_inspection_tool, audio_inspection_tool)
 
     prompt_use_files = ""
     for root, dirs, files in os.walk(folder_path):
         for file in files:
-            file_path = os.path.join(root, file)
+            extracted_file_path = os.path.join(root, file)
             prompt_use_files += "\n" + textwrap.indent(
-                get_single_file_description(file_path, question, visual_inspection_tool, document_inspection_tool, audio_inspection_tool),
+                get_single_file_description(extracted_file_path, question, visual_inspection_tool, document_inspection_tool, audio_inspection_tool),
                 prefix="    ",
             )
     return prompt_use_files

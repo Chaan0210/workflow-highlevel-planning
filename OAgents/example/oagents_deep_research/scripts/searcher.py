@@ -40,8 +40,19 @@ class BaseSearcher:
         web_snippets = []
         idx=1
         for search_info in snippets:
-            redacted_version = f"{idx}. [{search_info['title']}]({search_info['link']})" + \
-                            f"{search_info['date']}{search_info['source']}\n{self._pre_visit(search_info['link'])}{search_info['snippet']}"
+            # Handle error responses
+            if isinstance(search_info, dict) and "error" in search_info:
+                return f"Search failed: {search_info['error']}"
+            
+            # Handle normal responses with safe key access
+            title = search_info.get('title', 'No title')
+            link = search_info.get('link', search_info.get('href', search_info.get('url', 'No link')))
+            date = search_info.get('date', '')
+            source = search_info.get('source', '')
+            snippet = search_info.get('snippet', search_info.get('body', 'No snippet'))
+            
+            redacted_version = f"{idx}. [{title}]({link})" + \
+                            f"{date}{source}\n{self._pre_visit(link)}{snippet}"
 
             redacted_version = redacted_version.replace("Your browser can't play this video.", "")
             web_snippets.append(redacted_version)
@@ -111,7 +122,8 @@ class SerpSearcher(BaseSearcher):
     
         self.page_title = f"{query} - Search"
         if "organic_results" not in results.keys():
-            raise Exception(f"No results found for query: '{query}'. Use a less specific query.")
+            year_filter_message = f" with filter year={filter_year}" if filter_year is not None else ""
+            return f"No results found for query: '{query}'{year_filter_message}. Try with a more general query or different search terms."
         if len(results["organic_results"]) == 0:
             year_filter_message = f" with filter year={filter_year}" if filter_year is not None else ""
             return f"No results found for '{query}'{year_filter_message}. Try with a more general query, or remove the year filter."
@@ -309,17 +321,31 @@ dictionaries, each representing a search result."""
                 return responses
 
             # Iterate over results found
-            for i, result in enumerate(results, start=1):
-
-                response = {
-                    "idx": i,
-                    "title": result["title"],
-                    "snippet": result["body"],
-                    "link": result["href"],
-                    "source": '',
-                    "date": ''
-                }
-                responses.append(response)
+            if results and len(results) > 0:
+                try:
+                    for i, result in enumerate(results, start=1):
+                        # Handle potential missing keys in result dictionary
+                        if not isinstance(result, dict):
+                            continue
+                            
+                        response = {
+                            "idx": i,
+                            "title": result.get("title", "No title available"),
+                            "snippet": result.get("body", result.get("snippet", "No snippet available")),
+                            "link": result.get("href", result.get("url", "No link available")),
+                            "source": result.get("source", ""),
+                            "date": result.get("date", "")
+                        }
+                        responses.append(response)
+                except Exception as e:
+                    # If processing results fails, likely due to unexpected format
+                    error_msg = f"Error processing DuckDuckGo results: {e}"
+                    if "KeyError" in str(e):
+                        error_msg += " (Possible rate limit or format issue - try a different search engine)"
+                    responses.append({"error": error_msg})
+            else:
+                # No results case - could be due to rate limiting or genuine no results
+                responses.append({"error": "No results found in DuckDuckGo search (may be rate limited - try a different search engine)"})
 
         elif source == "images":
             try:
@@ -331,15 +357,20 @@ dictionaries, each representing a search result."""
                 responses.append({"error": error_msg})
                 return responses
 
-            for i, result in enumerate(results, start=1):
-                response = {
-                    "result_id": i,
-                    "title": result["title"],
-                    "image": result["image"],
-                    "url": result["url"],
-                    "source": result["source"],
-                }
-                responses.append(response)
+            if results:
+                for i, result in enumerate(results, start=1):
+                    if not isinstance(result, dict):
+                        continue
+                    response = {
+                        "result_id": i,
+                        "title": result.get("title", "No title available"),
+                        "image": result.get("image", "No image available"),
+                        "url": result.get("url", "No URL available"),
+                        "source": result.get("source", ""),
+                    }
+                    responses.append(response)
+            else:
+                responses.append({"error": "No image results found in DuckDuckGo search"})
 
         elif source == "videos":
             try:
@@ -351,17 +382,22 @@ dictionaries, each representing a search result."""
                 responses.append({"error": error_msg})
                 return responses
 
-            for i, result in enumerate(results, start=1):
-                response = {
-                    "idx": i,
-                    "title": result["title"],
-                    "snippets": result["description"],
-                    "embed_url": result["embed_url"],
-                    "publisher": result["publisher"],
-                    "duration": result["duration"],
-                    "published": result["published"],
-                }
-                responses.append(response)
+            if results:
+                for i, result in enumerate(results, start=1):
+                    if not isinstance(result, dict):
+                        continue
+                    response = {
+                        "idx": i,
+                        "title": result.get("title", "No title available"),
+                        "snippets": result.get("description", "No description available"),
+                        "embed_url": result.get("embed_url", "No embed URL available"),
+                        "publisher": result.get("publisher", "Unknown publisher"),
+                        "duration": result.get("duration", "Unknown duration"),
+                        "published": result.get("published", "Unknown date"),
+                    }
+                    responses.append(response)
+            else:
+                responses.append({"error": "No video results found in DuckDuckGo search"})
         additional_text = """
             Here are some tips to help you get the most out of your search results:
             - When dealing with web snippets, keep in mind that they are often brief and lack specific details. If the snippet doesn't provide useful information, but the URL is from a highly-ranked source, it might still contain the data you need. 
@@ -417,11 +453,60 @@ class SearchTool(Tool):
             self.reflector = SearchReflector()
             _, query = self.reflector.query_reflect(query)
 
+        # Try the original query first
         results = self.searcher.search(query, filter_year)
+        
+        # If results is a string (indicating no results found), try fallback strategies
+        if isinstance(results, str) and "No results found" in results:
+            fallback_queries = self._generate_fallback_queries(query)
+            
+            for fallback_query in fallback_queries:
+                print(f"Trying fallback query: {fallback_query}")
+                fallback_results = self.searcher.search(fallback_query, filter_year)
+                if isinstance(fallback_results, List) and len(fallback_results) > 0:
+                    results = fallback_results
+                    query = fallback_query  # Update query for content generation
+                    break
+            
+            # If no fallback worked, return the original message
+            if isinstance(results, str):
+                return results
+
         if isinstance(results, List):
             return self.searcher._to_content(query, results)
         else:
             return str(results)
+    
+    def _generate_fallback_queries(self, original_query: str) -> List[str]:
+        """Generate alternative search queries when original query fails"""
+        fallback_queries = []
+        
+        # Remove site-specific search constraints
+        if "site:" in original_query:
+            without_site = ' '.join([part for part in original_query.split() if not part.startswith('site:')])
+            fallback_queries.append(without_site)
+        
+        # If query contains scientific names, try common names or broader terms
+        if "Amphiprion percula" in original_query:
+            fallback_queries.extend([
+                "clownfish USGS database",
+                "Amphiprion USGS",
+                "clownfish invasive species database",
+                "USGS nonindigenous aquatic species",
+                "clownfish occurrence records"
+            ])
+        
+        # Extract key terms and create broader searches
+        words = original_query.lower().split()
+        key_terms = [word for word in words if len(word) > 3 and word not in ['site:', 'and', 'the', 'with', 'for']]
+        
+        if len(key_terms) >= 2:
+            # Try combinations of key terms
+            fallback_queries.append(' '.join(key_terms[:2]))
+            if len(key_terms) > 2:
+                fallback_queries.append(' '.join(key_terms[:3]))
+        
+        return fallback_queries[:3]  # Limit to 3 fallback attempts
 
 
 

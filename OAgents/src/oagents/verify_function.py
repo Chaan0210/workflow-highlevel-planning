@@ -22,7 +22,7 @@ from typing import Optional, Dict, Any
 from openai import OpenAI, AsyncOpenAI
 from dotenv import load_dotenv
 
-PARENT_DIR = os.path.dirname(os.path.dirname(os.getcwd()))
+PARENT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ENV_PATH = os.path.join(PARENT_DIR, ".env")
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
@@ -30,8 +30,12 @@ KEY = os.getenv("OPENAI_API_KEY")
 URL = os.getenv("OPENAI_BASE_URL")
 MODEL = "gpt-4.1"
 
-client = OpenAI(api_key=KEY, base_url=URL, timeout=600.0, max_retries=3)
-async_client = AsyncOpenAI(api_key=KEY, base_url=URL, timeout=600.0)
+client = None
+async_client = None
+
+if KEY:
+    client = OpenAI(api_key=KEY, base_url=URL, timeout=600.0, max_retries=3)
+    async_client = AsyncOpenAI(api_key=KEY, base_url=URL, timeout=600.0)
 
 
 def extract_json_objects(text: str) -> list:

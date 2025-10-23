@@ -40,10 +40,15 @@ class Step:
 class Workflow:
     def __init__(self, steps: Union[str, List[Step]] = None, wf_name='gaia_validation'):
         self._steps = []
-        self.load(steps)
+        self._raw_content = ""
+        self._mode = "sequential"
         self.wf_name = wf_name
+        self.load(steps)
 
     def load(self, steps: Union[str, List[Step]] = None):
+        self._steps = []
+        self._raw_content = ""
+        self._mode = "sequential"
         if isinstance(steps, str):
             self._steps = self.load_from_str(steps)
         elif steps:
@@ -51,9 +56,33 @@ class Workflow:
 
     def load_from_str(self, s: str):
 
-        return self._parse_initial_str(s)
+        s = (s or "").strip()
+        if not s:
+            self._steps = []
+            self._raw_content = ""
+            self._mode = "sequential"
+            return self._steps
+
+        if self._is_structured_plan(s):
+            self._mode = "structured"
+            self._raw_content = s
+            self._steps = self._extract_structured_steps(s)
+            return self._steps
+
+        self._steps = self._parse_initial_str(s)
+        self._raw_content = ""
+        self._mode = "sequential"
+        return self._steps
 
     def apply_update(self, s: str):
+
+        if self._mode == "structured" or self._is_structured_plan(s):
+            s = (s or "").strip()
+            if s:
+                self._mode = "structured"
+                self._raw_content = s
+                self._steps = self._extract_structured_steps(s)
+            return
 
         new_steps = self._parse_update_str(s)
         if not new_steps:
@@ -120,6 +149,19 @@ class Workflow:
         if match := pattern.match(line):
             return Step(int(match.group(1)), match.group(2))
         return None
+
+    @staticmethod
+    def _is_structured_plan(s: str) -> bool:
+        marker_patterns = ("##ST", "##PARALLEL_LIST", "##DAG_LIST")
+        return any(marker in s for marker in marker_patterns)
+
+    @staticmethod
+    def _extract_structured_steps(s: str) -> List[Step]:
+        steps = []
+        for line in s.splitlines():
+            if step := Workflow._parse_line(line):
+                steps.append(step)
+        return steps
     
     def load_from_file(self):
         wf_path = os.path.join(save_dir, f"{self.wf_name}.json")
@@ -148,8 +190,6 @@ class Workflow:
         return f"Workflow({self._steps})"
 
     def __str__(self):
-        return "\n".join(
-            f"{str(step)}"
-            for step in self._steps
-        )
-
+        if self._mode == "structured":
+            return self._raw_content
+        return "\n".join(str(step) for step in self._steps)

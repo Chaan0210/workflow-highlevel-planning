@@ -718,26 +718,37 @@ class MultiStepAgent:
         )
 
     def _prepare_plan_template(self, task, facts, additional_knowledge):
+        vars_base = {
+            "task": task,
+            "tools": self.tools,
+            "managed_agents": self.managed_agents,
+            "answer_facts": facts,
+        }
+        # 에이전트 KB가 있으면 지식 템플릿 우선
         if self.agent_kb and additional_knowledge:
-            return populate_template(
-                self.prompt_templates["planning"]["initial_plan_with_knowledge"],
-                variables={
-                    "task": task,
-                    "tools": self.tools,
-                    "managed_agents": self.managed_agents,
-                    "answer_facts": facts,
-                    "knowledge_data": additional_knowledge,
-                },
-            )
-        return populate_template(
-            self.prompt_templates["planning"]["initial_plan"],
-            variables={
-                "task": task,
-                "tools": self.tools,
-                "managed_agents": self.managed_agents,
-                "answer_facts": facts,
-            },
-        )
+            vars_kb = {**vars_base, "knowledge_data": additional_knowledge}
+            template = self.prompt_templates["planning"]["initial_plan_with_knowledge"]
+            body = populate_template(template, variables=vars_kb)
+        else:
+            # ⬇️ 서브태스크 모드면 섹션/DAG 템플릿 사용
+            if getattr(self, "subtask", False):
+                template = self.prompt_templates["planning"]["initial_plan_with_subtask"]
+                body = populate_template(template, variables=vars_base)
+                if getattr(self, "subtask_mode", "sections") == "sections":
+                    preface = (
+                        "### MODE: SECTIONS (Plan-then-Act)\n"
+                        "- DO NOT include ##DAG_LIST.\n"
+                        "- Provide ##PARALLEL_LIST as the **exact execution order** of sections.\n"
+                        "- Provide ##ST1, ##ST2, ... blocks with clear 'steps'.\n"
+                    )
+                else:
+                    preface = "### MODE: DAG (Graph)\n- Include ##DAG_LIST with all dependencies.\n"
+                return preface + "\n" + body
+            # 기본(비서브태스크) 초기 계획
+            template = self.prompt_templates["planning"]["initial_plan"]
+            body = populate_template(template, variables=vars_base)
+        return body
+
     
     def _generate_updated_facts(self):
         memory_messages = self.write_memory_to_messages()[1:]
@@ -748,22 +759,66 @@ class MultiStepAgent:
 
     def _prepare_update_messages(self, task, step, facts_update):
         memory_messages = self.write_memory_to_messages()[1:]
-        pre_message = self._create_message(
-            MessageRole.SYSTEM,
-            self.prompt_templates["planning"]["update_plan_pre_messages"],
-            task
-        )
-        post_message = self._create_message(
-            MessageRole.USER,
-            self.prompt_templates["planning"]["update_plan_post_messages"],
-            variables={
-                "task": task,
-                "tools": self.tools,
-                "managed_agents": self.managed_agents,
-                "facts_update": facts_update,
-                "remaining_steps": (self.max_steps - step),
+        # pre_message = self._create_message(
+        #     MessageRole.SYSTEM,
+        #     self.prompt_templates["planning"]["update_plan_pre_messages"],
+        #     task
+        # )
+        # post_message = self._create_message(
+        #     MessageRole.USER,
+        #     self.prompt_templates["planning"]["update_plan_post_messages"],
+        #     variables={
+        #         "task": task,
+        #         "tools": self.tools,
+        #         "managed_agents": self.managed_agents,
+        #         "facts_update": facts_update,
+        #         "remaining_steps": (self.max_steps - step),
+        #     }
+        # )
+        # 서브태스크 모드면 전용 템플릿 + 모드 힌트
+        if getattr(self, "subtask", False):
+            pre_message = self._create_message(
+                MessageRole.SYSTEM,
+                self.prompt_templates["planning"]["update_plan_pre_messages"],
+                task
+            )
+            mode_hint = (
+                "### MODE: SECTIONS\n- Update **##PARALLEL_LIST** as the execution order.\n- Keep **NO ##DAG_LIST**.\n"
+                if getattr(self, "subtask_mode", "sections") == "sections"
+                else "### MODE: DAG\n- Keep **##DAG_LIST** consistent with dependencies.\n"
+            )
+            body = populate_template(
+                self.prompt_templates["planning"]["update_plan_post_messages_with_subtask"],
+                variables={
+                    "task": task,
+                    "tools": self.tools,
+                    "managed_agents": self.managed_agents,
+                    "facts_update": facts_update,
+                    "remaining_steps": (self.max_steps - step),
+                },
+            )
+            post_message = {
+                "role": MessageRole.USER,
+                "content": [{"type": "text", "text": mode_hint + "\n" + body}],
             }
-        )
+        else:
+            pre_message = self._create_message(
+                MessageRole.SYSTEM,
+                self.prompt_templates["planning"]["update_plan_pre_messages"],
+                task
+            )
+            post_message = self._create_message(
+                MessageRole.USER,
+                self.prompt_templates["planning"]["update_plan_post_messages"],
+                variables={
+                    "task": task,
+                    "tools": self.tools,
+                    "managed_agents": self.managed_agents,
+                    "facts_update": facts_update,
+                    "remaining_steps": (self.max_steps - step),
+                }
+            )
+
         return [pre_message] + memory_messages + [post_message]
 
     def _create_dynamic_output(self, input_messages, facts_msg, plan_msg, is_first_step):
@@ -836,35 +891,8 @@ class MultiStepAgent:
         return input_messages, chat_message_facts.content
 
     def _get_static_plan(self):
-        static_plan = textwrap.dedent(f"""Here is the plan of action that I will follow to solve the task:
-        ```
-        1. If needed, use the search tool to find relevant information.
-        2. To inspect the information from search tool, use the proper agent tool.
-        3. Execute domain-specific processing with all information you have, such as mathematical calculations, statistical analysis or logical reasoning.    
-        4. Format final output, remember to follow the commanded format.
-        ```""")
-
-        memory_messages = self.write_memory_to_messages()
-
-        model_output_message_plan = ChatMessage(
-            role="assistant",
-            content="",
-            tool_calls=None,
-        )
-
-        model_output_message_facts = ChatMessage(
-            role="assistant",
-            content="",
-            tool_calls=None,
-        )
-
-        return PlanningStep(
-            model_input_messages=memory_messages,
-            plan=static_plan,
-            facts="",
-            model_output_message_plan=model_output_message_plan,
-            model_output_message_facts=model_output_message_facts,
-        )
+        # Return None to skip planning step when static_plan is enabled
+        return None
 
     def _handle_dynamic_plan(self, task, is_first_step, step, additional_knowledge):
         if is_first_step:
@@ -897,16 +925,34 @@ class MultiStepAgent:
                 Text(final_facts_knowledge),
                 level=LogLevel.INFO,
             )
+        # elif self.subtask:
+        #     initial_plan_template = populate_template(
+        #         self.prompt_templates["planning"]["initial_plan_with_subtask"],
+        #         variables={
+        #             "task": task,
+        #             "tools": self.tools,
+        #             "managed_agents": self.managed_agents,
+        #             "answer_facts": answer_facts,
+        #         },
+        #     )
         elif self.subtask:
-            initial_plan_template = populate_template(
+            base = populate_template(
                 self.prompt_templates["planning"]["initial_plan_with_subtask"],
-                variables={
-                    "task": task,
-                    "tools": self.tools,
-                    "managed_agents": self.managed_agents,
-                    "answer_facts": answer_facts,
-                },
+                variables={"task": task, "tools": self.tools, "managed_agents": self.managed_agents,
+                           "answer_facts": answer_facts},
             )
+            if getattr(self, "subtask_mode", "sections") == "sections":
+                # 섹션 모드: DAG 없이 순서 있는 섹션만 요구
+                preface = (
+                    "### MODE: SECTIONS (Plan-then-Act)\n"
+                    "- DO NOT include ##DAG_LIST.\n"
+                    "- Provide ##PARALLEL_LIST as the **exact execution order** of sections.\n"
+                    "- Provide ##ST1, ##ST2, ... blocks with clear 'steps'.\n"
+                )
+            else:
+                # DAG 모드: 기존 템플릿대로 DAG_LIST  PARALLEL_LIST  ST 블록 생성
+                preface = "### MODE: DAG (Graph)\n- Include ##DAG_LIST with all dependencies.\n"
+            initial_plan_template = preface + "\n" + base
         else:
             initial_plan_template = populate_template(
                 self.prompt_templates["planning"]["initial_plan"],
@@ -965,24 +1011,43 @@ class MultiStepAgent:
             ],
         }
 
+        # if self.subtask:
+        #     update_plan_post_messages = {
+        #         "role": MessageRole.USER,
+        #         "content": [
+        #             {
+        #                 "type": "text",
+        #                 "text": populate_template(
+        #                     self.prompt_templates["planning"]["update_plan_post_messages_with_subtask"],
+        #                     variables={
+        #                         "task": task,
+        #                         "tools": self.tools,
+        #                         "managed_agents": self.managed_agents,
+        #                         "facts_update": answer_facts,
+        #                         "remaining_steps": (self.max_steps - step),
+        #                     },
+        #                 ),
+        #             }
+        #         ],
+        #     }
+
         if self.subtask:
+            if getattr(self, "subtask_mode", "sections") == "sections":
+                mode_hint = (
+                    "### MODE: SECTIONS\n"
+                    "- Update **##PARALLEL_LIST** as the execution order.\n"
+                    "- Keep **NO ##DAG_LIST**.\n"
+                )
+            else:
+                mode_hint = "### MODE: DAG\n- Keep **##DAG_LIST** consistent with dependencies.\n"
+            body = populate_template(
+                self.prompt_templates["planning"]["update_plan_post_messages_with_subtask"],
+                variables={"task": task, "tools": self.tools, "managed_agents": self.managed_agents,
+                           "facts_update": answer_facts, "remaining_steps": (self.max_steps - step)},
+            )
             update_plan_post_messages = {
                 "role": MessageRole.USER,
-                "content": [
-                    {
-                        "type": "text",
-                        "text": populate_template(
-                            self.prompt_templates["planning"]["update_plan_post_messages_with_subtask"],
-                            variables={
-                                "task": task,
-                                "tools": self.tools,
-                                "managed_agents": self.managed_agents,
-                                "facts_update": answer_facts,
-                                "remaining_steps": (self.max_steps - step),
-                            },
-                        ),
-                    }
-                ],
+                "content": [{"type": "text", "text": mode_hint + "\n" + body}],
             }
         else:
             update_plan_post_messages = {
@@ -1406,6 +1471,21 @@ class ToolCallingAgent(MultiStepAgent):
         )
         return system_prompt
     
+    def _should_plan(self, step_number: int) -> bool:
+        """
+        Decide whether to run planning on this step.
+        Behavior:
+          - static_plan=True  -> never plan
+          - planning_interval=None -> plan only at step 1
+          - planning_interval=k -> plan every k steps (k==1 means every step)
+        """
+        if self.static_plan:
+            return False
+        if self.planning_interval is None or self.planning_interval <= 0:
+            return step_number == 1
+        return (step_number % self.planning_interval) == 0
+
+    
     def _run(self, task: str, images: List[str] | None = None, additional_knowledge: Optional[str] = None) -> Generator[ActionStep | AgentType, None, None]:
         """
         Run the agent in streaming mode and returns a generator of all the steps.
@@ -1424,13 +1504,10 @@ class ToolCallingAgent(MultiStepAgent):
                 observations_images=images,
             )
             try:
-                if (self.planning_interval is not None and self.step_number % self.planning_interval == 0 and self.planning_interval != 1) or self.step_number == 1:
-                    planning_step = self.planning_step(
-                        task,
-                        is_first_step=(self.step_number == 1),
-                        step=self.step_number,
-                    )
-                    self.memory.steps.append(planning_step)
+                if self._should_plan(self.step_number):
+                    planning_step = self.planning_step(task, is_first_step=(self.step_number == 1), step=self.step_number)
+                    if planning_step is not None:
+                        self.memory.steps.append(planning_step)
                 self.logger.log_rule(f"Step {self.step_number}", level=LogLevel.INFO)
 
                 final_answer = self.step(memory_step)
@@ -1500,7 +1577,9 @@ class ToolCallingAgent(MultiStepAgent):
                 stop_sequences=["Observation:"],
             )
             memory_step.model_output_message = model_message
-            if model_message.tool_calls is None or len(model_message.tool_calls) == 0:
+            if model_message is None:
+                raise Exception("Model returned None response. This may be due to token limit exceeded or API error.")
+            if not hasattr(model_message, 'tool_calls') or model_message.tool_calls is None or len(model_message.tool_calls) == 0:
                 raise Exception("Model did not call any tools. Call `final_answer` tool to return a final answer.")
             tool_call = model_message.tool_calls[0]
             tool_name, tool_call_id = tool_call.function.name, tool_call.id
@@ -1617,6 +1696,7 @@ class CodeAgent(MultiStepAgent):
         summary: bool = False,
         use_long_term_memory: bool = False,
         retrieve_key_memory: bool = False,
+        subtask_mode: str = 'sections',  # 'sections'(Plan-then-Act) | 'dag'(Graph)
         **kwargs,
     ):
         self.additional_authorized_imports = additional_authorized_imports if additional_authorized_imports else []
@@ -1652,6 +1732,8 @@ class CodeAgent(MultiStepAgent):
                 "Caution: you set an authorization for all imports, meaning your agent can decide to import any package it deems necessary. This might raise issues if the package is not installed in your environment.",
                 0,
             )
+        
+        self.subtask_mode = subtask_mode
 
         if use_e2b_executor and len(self.managed_agents) > 0:
             raise Exception(
@@ -1671,6 +1753,19 @@ class CodeAgent(MultiStepAgent):
                 all_tools,
                 max_print_outputs_length=max_print_outputs_length,
             )
+
+    def _should_plan(self, step_number: int) -> bool:
+        """
+        ToolCallingAgent와 동일한 규칙:
+          - static_plan=True  -> 플랜하지 않음
+          - planning_interval=None -> 1스텝(처음)만 플랜
+          - planning_interval=k -> 매 k스텝마다 플랜 (k==1이면 매 스텝)
+        """
+        if self.static_plan:
+            return False
+        if self.planning_interval is None or self.planning_interval <= 0:
+            return step_number == 1
+        return (step_number % self.planning_interval) == 0
 
     def embed_text(self, text: str) -> List[float]:
         try:
@@ -1807,8 +1902,163 @@ class CodeAgent(MultiStepAgent):
 
             steps = re.findall(r'^\s*\d+\..*$', body, flags=re.MULTILINE)
             subtask_dict[st_code] = {"title": title, "steps": '\n'.join(steps)}
-        return parallel_list, subtask_dict
+
+        # DAG_LIST 파싱: [(ST1, ST3), (ST2, ST4)] 형식
+        dag_edges = []
+        dag_match = re.search(r'##DAG_LIST\n(.*?)(?=##|\Z)', raw_plan, flags=re.DOTALL)
+        if dag_match:
+            import ast
+            try:
+                dag_edges = ast.literal_eval(dag_match.group(1).strip())
+                dag_edges = [(str(a).strip(), str(b).strip()) for (a, b) in dag_edges]
+            except Exception:
+                dag_edges = []
+        return parallel_list, subtask_dict, dag_edges
     
+    def _schedule_and_execute_subtasks(self, memory_step, plan_content, memory_messages, memory_steps):
+        parallel_list, subtask_dict, dag_edges = self._parse_plan(plan_content)
+        mode = getattr(self, "subtask_mode", "sections")
+
+        # 실행 순서 계산
+        order_batches = []  # list[list[STx]]
+        all_nodes = list(subtask_dict.keys())
+
+        # If no subtasks found, return empty results
+        if not all_nodes:
+            return False, []
+
+        if mode == "sections" or not dag_edges:
+            # 섹션: PARALLEL_LIST 순서로 1개씩 실행(없으면 ST 번호순)
+            seq = parallel_list if parallel_list else sorted(all_nodes, key=lambda s: int(s[2:]))
+            for st in seq:
+                order_batches.append([st])
+        else:
+            # DAG: Kahn's algorithm (레벨별 배치 실행)
+            from collections import defaultdict, deque
+            indeg = {n: 0 for n in all_nodes}
+            adj = defaultdict(list)
+            for a, b in dag_edges:
+                if a in indeg and b in indeg:
+                    adj[a].append(b)
+                    indeg[b] += 1
+            q = deque([n for n, d in indeg.items() if d == 0])
+            # PARALLEL_LIST가 있으면 우선순위 힌트로 사용
+            def st_priority(x): 
+                return (parallel_list.index(x) if x in parallel_list else 1e9, int(x[2:]))
+            while q:
+                # 같은 레벨은 병렬 배치(안전상 순차로 실행하지만 컨텍스트는 각자 전달)
+                level = sorted(list(q), key=st_priority)
+                order_batches.append(level)
+                for _ in range(len(level)):
+                    n = q.popleft()
+                    for m in adj[n]:
+                        indeg[m] -= 1
+                        if indeg[m] == 0:
+                            q.append(m)
+            # 사이클 대비: 남은 indeg>0 노드 있으면 번호순으로 뒤에 붙임
+            leftovers = [n for n, d in indeg.items() if d > 0]
+            if leftovers:
+                for n in sorted(leftovers, key=lambda s: int(s[2:])):
+                    order_batches.append([n])
+
+        # 실행: 이전 결과를 의존/이전 섹션 컨텍스트로 전달
+        sub_outputs = {}  # STx -> any
+        tool_call_list, msg_list, out_list, obs_list = [], [], [], []
+        subtask_entries: list[dict[str, Any]] = []
+        any_final = False
+        final_outputs = []
+
+        for batch in order_batches:
+            for st in batch:
+                title = subtask_dict[st]["title"]
+                steps = subtask_dict[st]["steps"]
+                # 컨텍스트 구성: 의존 모드면 선행노드 출력만, 섹션 모드면 이전 모든 섹션 출력 제공
+                if mode == "dag" and dag_edges:
+                    preds = [a for (a, b) in dag_edges if b == st and a in sub_outputs]
+                    ctx_pairs = [(p, sub_outputs[p]) for p in preds]
+                else:
+                    # 섹션: 이전 모든 완료 섹션
+                    ctx_pairs = list(sub_outputs.items())
+                ctx_text = ""
+                context_sources: list[str] = []
+                context_payload: list[str] = []
+                if ctx_pairs:
+                    context_sources = [p for p, _ in ctx_pairs]
+                    # 너무 길어지는 것 방지: 문자열로만 가볍게 전달
+                    def clip(v): 
+                        s = str(v)
+                        return s if len(s) < 1200 else (s[:1200] + " ...")
+                    ctx_lines = [f"- {k}: {clip(v)}" for k, v in ctx_pairs]
+                    context_payload = ctx_lines
+                    ctx_text = "Context from previous subtasks:\n" + "\n".join(ctx_lines) + "\n"
+
+                subtask_prompt = (
+                    "[SUB TASK AND steps]:\n"
+                    f"ANSWER THE SUBTASK:\n```\nsubtask: {title}\nsteps:\n{steps}\n```\n"
+                    + (ctx_text if ctx_text else "")
+                    + "Produce code to execute this subtask. If this subtask yields a final solution, call final_answer()."
+                )
+                message = Message(role=MessageRole.USER, content=[{"type": "text", "text": subtask_prompt}])
+                # 이전 메시지 + 서브태스크 메시지로 단일 실행
+                input_messages = memory_messages.copy()[:-1] + [message]
+                msg_list.append(input_messages)
+                try:
+                    additional_args = {"grammar": self.grammar} if self.grammar is not None else {}
+                    chat_message: ChatMessage = self.model(
+                        input_messages,
+                        stop_sequences=["<end_code>", "Observation:"],
+                        **additional_args,
+                    )
+                    model_output = chat_message.content if not isinstance(chat_message.content, list) else "".join(map(str, chat_message.content))
+                except Exception as e:
+                    raise AgentGenerationError(f"Error generating subtask code for {st}: {e}", self.logger)
+
+                # 코드 파싱 및 실행
+                try:
+                    code_action = fix_final_answer_code(parse_code_blobs(model_output))
+                except Exception as e:
+                    raise AgentParsingError(f"Error parsing code for {st}: {e}", self.logger)
+
+                tool_call_list.append(ToolCall(name="python_interpreter", arguments=code_action, id=f"call_sub_{st}"))
+                observation, output, memory_step, is_final_answer, exec_console = self.execute_code(memory_step, code_action)
+                obs_list.append(observation)
+                out_list.append(output)
+                effective_output = output if output not in (None, "", "None") else observation
+                sub_outputs[st] = effective_output
+                final_outputs.append(output)
+                subtask_entries.append(
+                    {
+                        "subtask": st,
+                        "title": title,
+                        "steps": steps,
+                        "context": ctx_text.strip(),
+                        "context_sources": context_sources,
+                        "context_payload": context_payload,
+                        "tool_call_id": f"call_sub_{st}",
+                        "tool_name": "python_interpreter",
+                        "code": code_action,
+                        "observation": observation,
+                        "raw_output": output,
+                        "effective_output": effective_output,
+                        "output": effective_output,
+                        "is_final_answer": is_final_answer,
+                    }
+                )
+                if is_final_answer:
+                    any_final = True
+                    break
+            if any_final:
+                break
+
+        # 메모리 스텝에 기록
+        memory_step.model_input_messages = f"subtask_input_messages: {msg_list}"
+        memory_step.model_output_message = None
+        memory_step.model_output = f"subtask_model_outputs: {len(out_list)} items"
+        memory_step.tool_calls = tool_call_list
+        memory_step.observations = f"subtask_observations: {len(obs_list)} items"
+        memory_step.action_output = subtask_entries
+        return any_final, final_outputs
+
     def _retrieve_key_memory(self, memory_messages: List[Message]):
         if not self.retrieve_key_memory or len(memory_messages) <= 4:
             return
@@ -1875,124 +2125,40 @@ class CodeAgent(MultiStepAgent):
         if self.retrieve_key_memory and len(memory_messages)>4:
             self.Most_Similar = self._retrieve_key_memory(memory_messages)
 
-        current_step = memory_steps[-1]
-        current_message = memory_messages[-1]['content'][0]['text']
-        plan_list = []
-        message_list = []
+        current_step = memory_steps[-1] if memory_steps else None
+        plan_content = None
+        if current_step and isinstance(current_step, PlanningStep):
+            if hasattr(current_step, "model_output_message_plan") and current_step.model_output_message_plan:
+                plan_content = current_step.model_output_message_plan.content
+            elif hasattr(current_step, "plan") and current_step.plan:
+                plan_content = current_step.plan
+        # current_message = memory_messages[-1]['content'][0]['text'] if memory_messages else ""
 
-        if current_message.startswith("[PLAN]"):
-            plan_content = current_step.model_output_message_plan.content
-            parallel_list, subtask_dict = self._parse_plan(plan_content)
+        # plan_list = []
+        # message_list = []
 
-            for plan_name in parallel_list:
-                subtask_title = subtask_dict[plan_name]["title"]
-                subtask_steps = subtask_dict[plan_name]["steps"]
-
-                subtask_plan = textwrap.dedent(
-                                f"""ANSWER THE SUBTASK:
-                                ```
-                                subtask: {subtask_title}
-                                steps: {subtask_steps}
-                                ```"""
-                            )
-                plan_list.append(subtask_plan)
-
-        if len(plan_list) > 0:
-            for plan in plan_list:
-                message = Message(role=MessageRole.USER, content=[{"type": "text", "text": f"[SUB TASK AND steps]:\n{plan.strip()}"}])
-                message_list.append(message)
-            
-            model_input_messages_list = []
-            model_output_message_list = []
-            model_output_list = []
-            observation_list = []
-            action_output_list = []
-            tool_call_list = []
-
-            for message in message_list:
-                input_messages = memory_messages.copy()[:-1]
-                input_messages.append(message)
-                if additional_prompt and self.reflection:
-                    input_messages.append(Message(role=MessageRole.SYSTEM, content=[{"type": "text", "text": additional_prompt}]))
-
-                model_input_messages_list.append(input_messages)
-                
-                try:
-                    additional_args = {"grammar": self.grammar} if self.grammar is not None else {}
-                    chat_message: ChatMessage = self.model(
-                        input_messages,
-                        stop_sequences=["<end_code>", "Observation:"],
-                        **additional_args,
-                    )
-
-                    if chat_message is None or chat_message.content is None:
-                        raise ValueError("Model returned empty or invalid chat message.")
-                    if isinstance(chat_message.content, list):
-                        # If it's a list, join its elements into a single string
-                        model_output = ''.join([str(item) for item in chat_message.content])  # Join list items into a string
-                    else:
-                        # If it's already a string, use it directly
-                        model_output = chat_message.content
-                    model_output_message_list.append(chat_message)
-                    model_output = chat_message.content
-                    model_output_list.append(model_output)
-                except Exception as e:
-                    raise AgentGenerationError(f"Error in generating model output:\n{e}", self.logger) from e
-
-                self.logger.log_markdown(
-                    content=model_output,
-                    title="Output message of the LLM:",
-                    level=LogLevel.DEBUG,
-                )
-
-                # Parse
-                try:
-                    code_action = fix_final_answer_code(parse_code_blobs(model_output))
-                except Exception as e:
-                    error_msg = f"Error in code parsing:\n{e}\nMake sure to provide correct code blobs."
-                    if self.debug:
-                        print(error_msg)
-                        new_code = self.edit_code_by_user(failed_code=model_output)
-                        if new_code:
-                            code_action = fix_final_answer_code(parse_code_blobs(new_code))
-                    else:
-                        raise AgentParsingError(error_msg, self.logger)
-
-                tool_call_list.append(
-                    ToolCall(
-                        name="python_interpreter",
-                        arguments=code_action,
-                        id=f"call_{len(memory_steps)}",
-                    )
-                )
-
-                observation, output, memory_step, is_final_answer, execution_outputs_console = self.execute_code(
-                    memory_step, code_action
-                )
-
-                truncated_output = truncate_content(str(output))
-                observation += "Last output from code snippet:\n" + truncated_output
-                observation_list.append(observation)
-
-                execution_outputs_console += [
-                    Text(
-                        f"{('Out - Final answer' if is_final_answer else 'Out')}: {truncated_output}",
-                        style=(f"bold {YELLOW_HEX}" if is_final_answer else ""),
-                    ),
-                ]
-                self.logger.log(Group(*execution_outputs_console), level=LogLevel.INFO)
-                if self.debug:
-                    take_a_breath()
-                action_output_list.append(output)
-
-            memory_step.model_input_messages = f"model_input_message_list: {model_input_messages_list}"
-            memory_step.model_output_message = f"model_output_message_list: {model_output_message_list}"
-            memory_step.model_output = f"model_output_list: {model_output_list}"
-            memory_step.tool_calls = tool_call_list
-            memory_step.observations = f"observation_list: {observation_list}"
-            memory_step.action_output = action_output_list
-
-            return action_output_list if is_final_answer else None
+        # if current_message.startswith("[PLAN]") and current_step and isinstance(current_step, PlanningStep):
+        #     if hasattr(current_step, "model_output_message_plan") and current_step.model_output_message_plan:
+        #         plan_content = current_step.model_output_message_plan.content
+        #         any_final, final_outputs = self._schedule_and_execute_subtasks(
+        #             memory_step, plan_content, memory_messages, memory_steps
+        #         )
+        #         return (final_outputs[-1] if any_final and final_outputs else None)
+        #     else:
+        #         # No plan content available, fall through to normal execution
+        #         pass
+        has_sections = False
+        if plan_content:
+            has_sections = (
+                bool(re.search(r'##ST\d+', plan_content)) or
+                ('##PARALLEL_LIST' in plan_content) or
+                ('##DAG_LIST' in plan_content)
+            )
+        if current_step and isinstance(current_step, PlanningStep) and has_sections:
+            any_final, final_outputs = self._schedule_and_execute_subtasks(
+                memory_step, plan_content, memory_messages, memory_steps
+            )
+            return (final_outputs[-1] if any_final and final_outputs else None)
         
         else:
 
@@ -2110,17 +2276,17 @@ class CodeAgent(MultiStepAgent):
             return output if is_final_answer else None
         
     def track_action_state(self, current_step, search_count, new_search_id, answer_message):
-        error_message = current_step.error.message if current_step.error else None
+        error_message = current_step.error.message if hasattr(current_step, 'error') and current_step.error else None
         return {
             'search_id': new_search_id,
             'search_count': search_count,
-            'current_depth': current_step.step_number,
-            'model_output': current_step.model_output,
-            'action_output': current_step.action_output,
+            'current_depth': getattr(current_step, 'step_number', None),
+            'model_output': getattr(current_step, 'model_output', None),
+            'action_output': getattr(current_step, 'action_output', None),
             'error_message': error_message,
-            'observations': current_step.observations,
-            'score': current_step.score,
-            'evaluate_thought': current_step.evaluate_thought,
+            'observations': getattr(current_step, 'observations', None),
+            'score': getattr(current_step, 'score', 0.0),
+            'evaluate_thought': getattr(current_step, 'evaluate_thought', None),
             'answer_message': answer_message,
         }
 
@@ -2156,7 +2322,8 @@ class CodeAgent(MultiStepAgent):
             step=step_number,
             additional_knowledge=additional_knowledge
         )
-        self.logger.log_rule(f"Step {step_number}", level=LogLevel.INFO)
+        if planning_step is not None:
+            self.logger.log_rule(f"Step {step_number}", level=LogLevel.INFO)
         return planning_step
 
     def _record_action(self, memory_step, step_number, answer_message):
@@ -2255,7 +2422,8 @@ class CodeAgent(MultiStepAgent):
             task_success = False
             self.step_number = 1
             planning_step = self._create_planning_step(task, self.step_number, additional_knowledge)
-            memory_steps.append(planning_step)
+            if planning_step is not None:
+                memory_steps.append(planning_step)
 
             memory_messages = self.write_memory_to_messages(memory_steps=memory_steps)
             step_number = self.step_number
@@ -2287,7 +2455,8 @@ class CodeAgent(MultiStepAgent):
         memory_steps = self.memory.steps.copy()
         planning_step = self._create_planning_step(task, self.step_number, additional_knowledge)
         base_memory_steps = memory_steps.copy()
-        base_memory_steps.append(planning_step)
+        if planning_step is not None:
+            base_memory_steps.append(planning_step)
         task_success = False
         evaluate = True
         final_answer_candidates = []
@@ -2320,7 +2489,8 @@ class CodeAgent(MultiStepAgent):
     def _run_beam_search_strategy(self, task, images, additional_knowledge):
         memory_steps = self.memory.steps.copy()
         planning_step = self._create_planning_step(task, self.step_number, additional_knowledge)
-        memory_steps.append(planning_step)
+        if planning_step is not None:
+            memory_steps.append(planning_step)
         base_memory_steps = memory_steps.copy()
         beam_size=2
         nodes_list = [base_memory_steps, copy.deepcopy(base_memory_steps)] #beamsize default2
@@ -2368,7 +2538,10 @@ class CodeAgent(MultiStepAgent):
         nodes_list=[]
         for tree_idx in range(self.n_rollouts//beam_size):
             planning_step = self._create_planning_step(task, self.step_number, additional_knowledge)
-            nodes_list.append(memory_steps+[planning_step]) #beamsize default2
+            if planning_step is not None:
+                nodes_list.append(memory_steps+[planning_step]) #beamsize default2
+            else:
+                nodes_list.append(memory_steps.copy())
         task_success = False
         evaluate = True
         final_answer_candidates = []
@@ -2407,27 +2580,24 @@ class CodeAgent(MultiStepAgent):
 
 
     def _run_baseline_strategy(self, task, images, additional_knowledge):
-
         memory_steps = self.memory.steps.copy()
-
-        planning_step = self._create_planning_step(task, self.step_number, additional_knowledge)
-        memory_steps.append(planning_step)
-
-        current_memory_messages = self.write_memory_to_messages(memory_steps=memory_steps)
         task_success, reflection = False, ''
         evaluate = True if self.reflection else False
         while not task_success and self.step_number <= self.max_steps:
-            if self.planning_interval is not None and self.step_number % self.planning_interval == 0 and self.planning_interval != 1:
+            current_memory_messages = self.write_memory_to_messages(memory_steps=memory_steps)
+            if self._should_plan(self.step_number):
                 planning_step = self._create_planning_step(task, self.step_number, additional_knowledge)
-                memory_steps.append(planning_step)
+                if planning_step is not None:
+                    memory_steps.append(planning_step)
+                    current_memory_messages = self.write_memory_to_messages(memory_steps=memory_steps)
             try:
-                if not reflection:  # 如果node_dict是空字典
+                if not reflection:
                     additional_prompt = ""
                 else:
                     node_exp = "\n".join(f"{k}: {v}" for k, v in reflection.items())
                     additional_prompt = self.BASE_ADDITIONAL_PROMPT + f"{node_exp}\n\n"
                 final_answer, _, reflection = self.process_step(
-                    self.step_number, images, current_memory_messages, memory_steps,additional_prompt, evaluate=evaluate)
+                    self.step_number, images, current_memory_messages, memory_steps, additional_prompt, evaluate=evaluate)
                 answer_message = self.get_memory_step_message(memory_steps, None)
 
             except Exception as e:
@@ -2466,8 +2636,6 @@ class CodeAgent(MultiStepAgent):
             elif isinstance(step, PlanningStep):
                 return (
                     f"[PlanningStep]\n"
-                    f"  facts that we knows: {step.facts}\n"
-                    f"  current plan: {step.plan}\n"
                     f"  facts that we knows: {step.facts}\n"
                     f"  current plan: {step.plan}\n"
                     f"  reason: {step.reason if hasattr(step, 'reason') else None}"

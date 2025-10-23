@@ -1247,8 +1247,9 @@ class FakeToolCallOpenAIServerModel(Model):
             convert_images_to_image_urls=True,
             **kwargs,
         )
-
-        if "ep" or "r1" in self.model_id.lower():
+        
+        mid = self.model_id.lower()
+        if ("ep" in mid) or ("r1" in mid):
             completion_kwargs["messages"] = dict_content_to_str(completion_kwargs["messages"])
 
         max_retries = 5

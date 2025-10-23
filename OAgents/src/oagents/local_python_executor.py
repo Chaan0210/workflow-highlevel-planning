@@ -1019,6 +1019,15 @@ def get_safe_module(raw_module, dangerous_patterns, authorized_imports, visited=
 
     # Copy all attributes by reference, recursively checking modules
     for attr_name in dir(raw_module):
+        # Special exception for re.compile - allow it as it's needed for regex operations
+        if raw_module.__name__ == "re" and attr_name == "compile":
+            try:
+                attr_value = getattr(raw_module, attr_name)
+                setattr(safe_module, attr_name, attr_value)
+            except:
+                pass
+            continue
+            
         # Skip dangerous patterns at any level
         if any(
             pattern in raw_module.__name__.split(".") + [attr_name]
