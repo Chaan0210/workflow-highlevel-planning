@@ -14,17 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
-from typing import Union, List
-import os
 import json
+import os
+import re
+from typing import List, Union
 
-save_dir = 'workflow'
+
+save_dir = "workflow"
 os.makedirs(save_dir, exist_ok=True)
 
-class Step:
 
-    __slots__ = ('index', 'description')
+class Step:
+    __slots__ = ("index", "description")
 
     def __init__(self, index: int, description: str):
         self.index = index
@@ -38,7 +39,7 @@ class Step:
 
 
 class Workflow:
-    def __init__(self, steps: Union[str, List[Step]] = None, wf_name='gaia_validation'):
+    def __init__(self, steps: Union[str, List[Step]] = None, wf_name="gaia_validation"):
         self._steps = []
         self._raw_content = ""
         self._mode = "sequential"
@@ -55,7 +56,6 @@ class Workflow:
             self._steps = list(steps)
 
     def load_from_str(self, s: str):
-
         s = (s or "").strip()
         if not s:
             self._steps = []
@@ -75,7 +75,6 @@ class Workflow:
         return self._steps
 
     def apply_update(self, s: str):
-
         if self._mode == "structured" or self._is_structured_plan(s):
             s = (s or "").strip()
             if s:
@@ -92,24 +91,21 @@ class Workflow:
         max_allowed_start = len(self._steps) + 1
 
         if not (1 <= start_num <= max_allowed_start):
-            raise ValueError(
-                f"Initial step: {start_num}, out of range (1-{max_allowed_start})"
-            )
+            raise ValueError(f"Initial step: {start_num}, out of range (1-{max_allowed_start})")
 
         overlap_end = start_num + len(new_steps) - 1
         original_end = len(self._steps)
 
         if start_num <= original_end:
-            self._steps = self._steps[:start_num-1] + new_steps
+            self._steps = self._steps[: start_num - 1] + new_steps
         else:
             self._steps += new_steps
 
         if start_num <= original_end and (overlap_end < original_end):
-            print(f"Warning: step {overlap_end+1}-{original_end} trashed")
+            print(f"Warning: step {overlap_end + 1}-{original_end} trashed")
 
     @staticmethod
     def _parse_update_str(s: str) -> List[Step]:
-
         steps = []
         current_base = None
         for line in s.splitlines():
@@ -127,7 +123,6 @@ class Workflow:
 
     @staticmethod
     def _parse_initial_str(s: str) -> List[Step]:
-
         steps = []
         expected = 1
         for line in s.splitlines():
@@ -140,11 +135,7 @@ class Workflow:
 
     @staticmethod
     def _parse_line(line: str) -> Union[Step, None]:
-
-        pattern = re.compile(
-            r'^\s*[([{]?(\d+)[.)\]、}]\s*(.*)$',
-            flags=re.UNICODE
-        )
+        pattern = re.compile(r"^\s*[([{]?(\d+)[.)\]、}]\s*(.*)$", flags=re.UNICODE)
         line = line.strip()
         if match := pattern.match(line):
             return Step(int(match.group(1)), match.group(2))
@@ -162,22 +153,22 @@ class Workflow:
             if step := Workflow._parse_line(line):
                 steps.append(step)
         return steps
-    
+
     def load_from_file(self):
         wf_path = os.path.join(save_dir, f"{self.wf_name}.json")
         if os.path.exists(wf_path):
-            with open(wf_path, 'r') as f:
+            with open(wf_path, "r") as f:
                 data = json.load(f)
             if self.task_id in data:
-                self._steps = self.load_from_str(data[self.task_id]['workflow'])
+                self._steps = self.load_from_str(data[self.task_id]["workflow"])
             else:
                 raise ValueError(f"task_id {self.task_id} not found in {wf_path}")
         else:
-           raise FileNotFoundError
+            raise FileNotFoundError
 
     def save_to_file(self, data_dict):
         wf_path = os.path.join(save_dir, f"{self.wf_name}.jsonl")
-        with open(wf_path, 'a+', encoding='utf-8') as f:
+        with open(wf_path, "a+", encoding="utf-8") as f:
             f.write(json.dumps(data_dict) + "\n")
 
     def __getitem__(self, index: int):

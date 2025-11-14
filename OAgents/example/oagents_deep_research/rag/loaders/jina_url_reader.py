@@ -18,6 +18,7 @@ from warnings import warn
 
 from rag.types.enums import JinaReturnFormat
 
+
 JINA_ENDPOINT = "https://r.jina.ai/"
 
 
@@ -54,7 +55,7 @@ class JinaURLReader:
         timeout: int = 30,
         **kwargs: Any,
     ) -> None:
-        api_key = api_key or os.getenv('JINA_API_KEY')
+        api_key = api_key or os.getenv("JINA_API_KEY")
         if not api_key:
             warn(
                 "JINA_API_KEY not set. This will result in a low rate limit "

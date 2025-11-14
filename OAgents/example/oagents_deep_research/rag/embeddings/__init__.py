@@ -18,6 +18,7 @@ from .openai_embedding import OpenAIEmbedding
 from .sentence_transformers_embeddings import SentenceTransformerEncoder
 from .vlm_embedding import VisionLanguageEmbedding
 
+
 __all__ = [
     "BaseEmbedding",
     "OpenAIEmbedding",

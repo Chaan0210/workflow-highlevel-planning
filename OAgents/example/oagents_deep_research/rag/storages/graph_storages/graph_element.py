@@ -17,6 +17,7 @@ from typing import List, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
+
 try:
     from unstructured.documents.elements import Element
 except ImportError:

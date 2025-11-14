@@ -302,14 +302,14 @@ planning:
 
     ELSE if given task can be broken down into subtasks, you will:
     - Identify all subtasks needed to complete the overall task.
-    - Define ALL subtask dependencies in ##DAG_LIST using tuples(ST_A, ST_B) to indicate ST_B depends on ST_A.
+    - Define ALL subtask dependencies in ##DAG_LIST using tuples('ST_A', 'ST_B') to indicate ST_B depends on ST_A. Always quote the subtask identifiers so the list is valid Python syntax.
     - Based on these dependencies, determine which subtasks have no prerequisites and can start immediately.
     - Provide ##PARALLEL_LIST containing ONLY subtask indices that have no dependencies in the DAG.
     - Provide a complete step-by-step plan for each subtask.
     - For any dependent subtask, explicitly state its dependencies in its first step.
     - You will format your response as follows:
       ##DAG_LIST
-      [(ST_A, ST_B), (ST_C, ST_D), ...]
+      [('ST_A', 'ST_B'), ('ST_C', 'ST_D'), ...]
       ##PARALLEL_LIST
       [subtask indices have no prerequisites and can start immediately joined by commas]
       ##ST1:[subtask description]
@@ -366,7 +366,7 @@ planning:
 
     SUBTASKS EXAMPLE:
     ##DAG_LIST
-    [(ST1, ST3), (ST1, ST4), (ST2, ST4)]
+    [('ST1', 'ST3'), ('ST1', 'ST4'), ('ST2', 'ST4')]
 
     ##PARALLEL_LIST
     ST1, ST2

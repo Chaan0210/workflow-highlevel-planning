@@ -47,6 +47,7 @@ from .token_counting import (
     get_model_encoding,
 )
 
+
 __all__ = [
     "print_text_animated",
     "get_prompt_template_key_words",

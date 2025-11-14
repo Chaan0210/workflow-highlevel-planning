@@ -11,7 +11,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ========= Copyright 2023-2024 @ CAMEL-AI.org. All Rights Reserved. =========
-import os
 from enum import Enum, EnumMeta
 from typing import cast
 
@@ -41,7 +40,7 @@ class ModelType(UnifiedModelType, Enum):
     O3_MINI = "o3-mini"
 
     GLM_4 = "glm-4"
-    GLM_4V = 'glm-4v'
+    GLM_4V = "glm-4v"
     GLM_3_TURBO = "glm-3-turbo"
 
     # Groq platform models

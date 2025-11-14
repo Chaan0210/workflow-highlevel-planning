@@ -1,13 +1,16 @@
 import json
+import logging
 import os
 import shutil
 import textwrap
 import zipfile
-import logging
 from pathlib import Path
+
 from oagents.utils import AgentError
 
+
 logger = logging.getLogger(__name__)
+
 
 def serialize_agent_error(obj):
     if isinstance(obj, AgentError):
@@ -29,13 +32,17 @@ def get_document_description(file_path: str, question: str, document_inspection_
 Do not add any information that is not present in the document."""
     return document_inspection_tool.forward_initial_exam_mode(file_path=file_path, question=prompt)
 
+
 def get_audio_description(audio_path: str, question: str, audio_inspection_tool) -> str:
     prompt = f"""Write a caption of 5 sentences for this audio. Pay special attention to any details that might be useful for someone answering the following question:
 {question}. But do not try to answer the question directly!
 Do not add any information that is not present in the audio."""
     return audio_inspection_tool.forward(file_path=audio_path, question=prompt)
 
-def get_single_file_description(file_path: str, question: str, visual_inspection_tool, document_inspection_tool, audio_inspection_tool):
+
+def get_single_file_description(
+    file_path: str, question: str, visual_inspection_tool, document_inspection_tool, audio_inspection_tool
+):
     file_extension = file_path.split(".")[-1]
     if file_extension in ["png", "jpg", "jpeg"]:
         file_description = f" - Attached image: {file_path}"
@@ -43,31 +50,33 @@ def get_single_file_description(file_path: str, question: str, visual_inspection
             f"\n     -> Image description: {get_image_description(file_path, question, visual_inspection_tool)}"
         )
         return file_description
-    
+
     elif file_extension in ["pdf", "xls", "xlsx", "docx", "doc", "xml", "ppt"]:
         file_description = f" - Attached document: {file_path}"
         description = get_document_description(file_path, question, document_inspection_tool)
         file_description += f"\n     -> File description: {description}"
         return file_description
-    
+
     elif file_extension in ["mp3", "m4a", "wav"]:
         file_description = f" - Attached audio: {file_path}"
         file_description += (
             f"\n     -> File description: {get_audio_description(file_path, question, audio_inspection_tool)}"
         )
         return file_description
-    
+
     else:
         return f" - Attached file: {file_path}"
 
 
-def get_zip_description(file_path: str, question: str, visual_inspection_tool, document_inspection_tool, audio_inspection_tool):
+def get_zip_description(
+    file_path: str, question: str, visual_inspection_tool, document_inspection_tool, audio_inspection_tool
+):
     folder_path = file_path.replace(".zip", "")
     os.makedirs(folder_path, exist_ok=True)
 
     try:
         # First check if it's a valid zip file
-        with zipfile.ZipFile(file_path, 'r') as zip_ref:
+        with zipfile.ZipFile(file_path, "r") as zip_ref:
             zip_ref.testzip()  # Test the integrity of the zip file
 
         # If valid, extract it
@@ -76,14 +85,22 @@ def get_zip_description(file_path: str, question: str, visual_inspection_tool, d
     except (zipfile.BadZipFile, zipfile.LargeZipFile, Exception) as e:
         logger.error(f"Failed to process zip file {file_path}: {e}")
         # If it's not a valid zip file or extraction fails, treat it as a single file
-        return get_single_file_description(file_path, question, visual_inspection_tool, document_inspection_tool, audio_inspection_tool)
+        return get_single_file_description(
+            file_path, question, visual_inspection_tool, document_inspection_tool, audio_inspection_tool
+        )
 
     prompt_use_files = ""
     for root, dirs, files in os.walk(folder_path):
         for file in files:
             extracted_file_path = os.path.join(root, file)
             prompt_use_files += "\n" + textwrap.indent(
-                get_single_file_description(extracted_file_path, question, visual_inspection_tool, document_inspection_tool, audio_inspection_tool),
+                get_single_file_description(
+                    extracted_file_path,
+                    question,
+                    visual_inspection_tool,
+                    document_inspection_tool,
+                    audio_inspection_tool,
+                ),
                 prefix="    ",
             )
     return prompt_use_files

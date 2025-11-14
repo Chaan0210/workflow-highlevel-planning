@@ -14,12 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import re
 import string
 import warnings
-
-import numpy as np
 
 
 def normalize_number_str(number_str: str) -> float:
@@ -63,9 +60,7 @@ def question_scorer(
         ma_elems = split_string(model_answer)
 
         if len(gt_elems) != len(ma_elems):
-            warnings.warn(
-                "Answer lists have different lengths, returning False.", UserWarning
-            )
+            warnings.warn("Answer lists have different lengths, returning False.", UserWarning)
             return False
 
         comparisons = []
@@ -75,8 +70,7 @@ def question_scorer(
                 comparisons.append(normalized_ma_elem == float(gt_elem))
             else:
                 comparisons.append(
-                    normalize_str(ma_elem, remove_punct=False)
-                    == normalize_str(gt_elem, remove_punct=False)
+                    normalize_str(ma_elem, remove_punct=False) == normalize_str(gt_elem, remove_punct=False)
                 )
         return all(comparisons)
 
@@ -86,7 +80,6 @@ def question_scorer(
 
 
 def normalize_str(input_str, remove_punct=True) -> str:
-
     no_spaces = re.sub(r"\s", "", input_str)
 
     if remove_punct:

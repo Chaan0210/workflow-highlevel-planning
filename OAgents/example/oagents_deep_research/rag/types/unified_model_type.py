@@ -15,6 +15,7 @@ import logging
 from threading import Lock
 from typing import TYPE_CHECKING, ClassVar, Dict, Union, cast
 
+
 if TYPE_CHECKING:
     from rag.types import ModelType
 
@@ -52,10 +53,7 @@ class UnifiedModelType(str):
     def token_limit(self) -> int:
         r"""Returns the token limit for the model. Here we set the default
         value as `999_999_999` if it's not provided from `model_config_dict`"""
-        logging.warning(
-            "Invalid or missing `max_tokens` in `model_config_dict`. "
-            "Defaulting to 999_999_999 tokens."
-        )
+        logging.warning("Invalid or missing `max_tokens` in `model_config_dict`. Defaulting to 999_999_999 tokens.")
         return 999_999_999
 
     @property

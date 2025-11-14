@@ -173,9 +173,7 @@ class AgentAudio(AgentType, str):
 
     def __init__(self, value, samplerate=16_000):
         if not _is_package_available("soundfile") or not is_torch_available():
-            raise ModuleNotFoundError(
-                "Please install 'audio' extra to use AgentAudio: `pip install 'oagents[audio]'`"
-            )
+            raise ModuleNotFoundError("Please install 'audio' extra to use AgentAudio: `pip install 'oagents[audio]'`")
         import torch
 
         super().__init__(value)

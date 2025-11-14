@@ -8,7 +8,7 @@ cd ./OAgents/example/oagents_deep_research
 python run_gaia.py \
   --concurrency 8 \
   --model_id gpt-5 --model_id_search gpt-5 \
-  --run_name gpt-5-gaia-level1-30-static \
+  --run_name gpt-5-gaia-l1-30-react-2025-11-09 \
   --level 1 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
   --static_plan \
   --max_steps 20 \
@@ -18,7 +18,7 @@ python run_gaia.py \
 python run_gaia.py \
   --concurrency 8 \
   --model_id gpt-5 --model_id_search gpt-5 \
-  --run_name gpt-5-gaia-level2-30-static \
+  --run_name gpt-5-gaia-l2-30-react-2025-11-09 \
   --level 2 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
   --static_plan \
   --max_steps 20 \
@@ -28,7 +28,7 @@ python run_gaia.py \
 python run_gaia.py \
   --concurrency 8 \
   --model_id gpt-5 --model_id_search gpt-5 \
-  --run_name gpt-5-gaia-level3-30-static \
+  --run_name gpt-5-gaia-l3-30-react-2025-11-09 \
   --level 3 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
   --static_plan \
   --max_steps 20 \

@@ -15,7 +15,6 @@
 # limitations under the License.
 
 import base64
-import json
 import mimetypes
 import os
 import uuid
@@ -27,9 +26,10 @@ from PIL import Image
 
 from oagents import Tool
 from oagents.models import Model
-from PIL import Image
+
 
 load_dotenv(override=True)
+
 
 class VisualInspectorTool(Tool):
     name = "inspect_file_as_image"
@@ -97,10 +97,9 @@ This tool supports the following image formats: [".jpg", ".jpeg", ".png", ".gif"
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode("utf-8")
 
-
     def forward(self, file_path: str, question: Optional[str] = None) -> str:
         self._validate_file_type(file_path)
-        
+
         if not question:
             question = "Please write a detailed caption for this image."
         try:
@@ -121,16 +120,9 @@ This tool supports the following image formats: [".jpg", ".jpeg", ".png", ".gif"
                 "top_p": 0.1,
             }
 
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.gpt_key}"
-            }
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.gpt_key}"}
 
-            response = requests.post(
-                f"{self.gpt_url}/chat/completions",
-                headers=headers,
-                json=payload
-            )
+            response = requests.post(f"{self.gpt_url}/chat/completions", headers=headers, json=payload)
             response.raise_for_status()
             description = response.json()["choices"][0]["message"]["content"]
         except Exception as gpt_error:
@@ -138,4 +130,6 @@ This tool supports the following image formats: [".jpg", ".jpeg", ".png", ".gif"
 
         if not question.startswith("Please write a detailed caption"):
             return description
-        return f"You did not provide a particular question, so here is a detailed description of the image: {description}"
+        return (
+            f"You did not provide a particular question, so here is a detailed description of the image: {description}"
+        )

@@ -16,14 +16,17 @@
 # Portions of this file are modifications by OPPO PersonalAI Team.
 # Licensed under the Apache License, Version 2.0.
 
+import os
 from dataclasses import asdict, dataclass
 from logging import getLogger
 from typing import TYPE_CHECKING, Any, Dict, List, TypedDict, Union
-import os
+
+from openai import OpenAI
+
 from oagents.models import ChatMessage, MessageRole
 from oagents.monitoring import AgentLogger, LogLevel
 from oagents.utils import AgentError, make_json_serializable
-from openai import OpenAI
+
 
 if TYPE_CHECKING:
     from oagents.models import ChatMessage
@@ -80,7 +83,7 @@ class ActionStep(MemoryStep):
     action_output: Any = None
     score: float = 0.0
     evaluate_thought: str | None = None
-    
+
     def dict(self):
         # We overwrite the method to parse the tool_calls and action_output manually
         return {
@@ -99,7 +102,9 @@ class ActionStep(MemoryStep):
             "evaluate_thought": self.evaluate_thought,
         }
 
-    def to_messages(self, summary_mode: bool = False, show_model_input_messages: bool = False, summary: bool = False) -> List[Message]:
+    def to_messages(
+        self, summary_mode: bool = False, show_model_input_messages: bool = False, summary: bool = False
+    ) -> List[Message]:
         messages = []
         if self.model_input_messages is not None and show_model_input_messages:
             messages.append(Message(role=MessageRole.SYSTEM, content=self.model_input_messages))
@@ -135,10 +140,16 @@ class ActionStep(MemoryStep):
         if self.evaluate_thought:
             messages.append(
                 Message(
-                    role=MessageRole.ASSISTANT, content=[{"type": "text", "text": f"score of the action:\n {self.score}\n evalution of the action:\n{self.evaluate_thought},Based on the given score and evaluation,Now let's reflect and improve the action."}]
+                    role=MessageRole.ASSISTANT,
+                    content=[
+                        {
+                            "type": "text",
+                            "text": f"score of the action:\n {self.score}\n evalution of the action:\n{self.evaluate_thought},Based on the given score and evaluation,Now let's reflect and improve the action.",
+                        }
+                    ],
                 )
             )
-          
+
         if self.error is not None:
             error_message = (
                 "Error:\n"
@@ -168,22 +179,26 @@ class ActionStep(MemoryStep):
         if self.evaluate_thought:
             messages.append(
                 Message(
-                    role=MessageRole.ASSISTANT, content=[{"type": "text", "text": f"score of the action:\n {self.score}\n evalution of the action:\n{self.evaluate_thought},Based on the given score and evaluation,Now let's reflect and improve the action."}]
+                    role=MessageRole.ASSISTANT,
+                    content=[
+                        {
+                            "type": "text",
+                            "text": f"score of the action:\n {self.score}\n evalution of the action:\n{self.evaluate_thought},Based on the given score and evaluation,Now let's reflect and improve the action.",
+                        }
+                    ],
                 )
             )
         if summary:
             summary_content = self._generate_local_summary(messages)
             messages.append(
                 Message(
-                    role=MessageRole.ASSISTANT, 
-                    content=[{"type": "text", "text": f"Step Summary:\n{summary_content}"}]
+                    role=MessageRole.ASSISTANT, content=[{"type": "text", "text": f"Step Summary:\n{summary_content}"}]
                 )
             )
-            
-        return messages
-    
-    def _generate_local_summary(self, messages: List[Message]) -> str:
 
+        return messages
+
+    def _generate_local_summary(self, messages: List[Message]) -> str:
         prompt = (
             "Summarize the following text which is the execution content of the agent at the current step. "
             "Highlight the key points to assist the agent in better reasoning during subsequent steps.\n\n"
@@ -197,23 +212,16 @@ class ActionStep(MemoryStep):
         if not api_key or not api_base:
             raise EnvironmentError("Missing required environment variables for OpenAI API.")
 
-        client = OpenAI(
-            api_key=api_key,
-            base_url=api_base
-        )
+        client = OpenAI(api_key=api_key, base_url=api_base)
 
         try:
-            response = client.chat.completions.create(
-                model="o1",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
+            response = client.chat.completions.create(model="o1", messages=[{"role": "user", "content": prompt}])
             summary_content = response.choices[0].message.content
         except Exception as e:
             raise RuntimeError(f"Failed to generate summary via OpenAI: {e}")
 
         return summary_content
+
 
 @dataclass
 class PlanningStep(MemoryStep):
@@ -224,7 +232,6 @@ class PlanningStep(MemoryStep):
     plan: str
 
     def to_messages(self, summary_mode: bool, **kwargs) -> List[Message]:
-        
         messages = []
         messages.append(
             Message(
@@ -247,7 +254,6 @@ class TaskStep(MemoryStep):
     task_images: List[str] | None = None
 
     def to_messages(self, summary_mode: bool = False, **kwargs) -> List[Message]:
-        
         content = [{"type": "text", "text": f"New task:\n{self.task}"}]
         if self.task_images:
             for image in self.task_images:
@@ -261,7 +267,6 @@ class SystemPromptStep(MemoryStep):
     system_prompt: str
 
     def to_messages(self, summary_mode: bool = False, **kwargs) -> List[Message]:
-        
         if summary_mode:
             return []
         return [Message(role=MessageRole.SYSTEM, content=[{"type": "text", "text": self.system_prompt}])]

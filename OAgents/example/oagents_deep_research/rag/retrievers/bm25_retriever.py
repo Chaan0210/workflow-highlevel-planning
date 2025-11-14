@@ -19,6 +19,7 @@ from rag.loaders import UnstructuredIO
 from rag.retrievers import BaseRetriever
 from rag.utils import dependencies_required
 
+
 DEFAULT_TOP_K_RESULTS = 1
 
 
@@ -41,7 +42,7 @@ class BM25Retriever(BaseRetriever):
         https://github.com/dorianbrown/rank_bm25
     """
 
-    @dependencies_required('rank_bm25')
+    @dependencies_required("rank_bm25")
     def __init__(self) -> None:
         r"""Initializes the BM25Retriever."""
         from rank_bm25 import BM25Okapi
@@ -71,13 +72,9 @@ class BM25Retriever(BaseRetriever):
 
         # Load and preprocess documents
         self.content_input_path = content_input_path
-        elements = self.unstructured_modules.parse_file_or_url(
-            content_input_path, **kwargs
-        )
+        elements = self.unstructured_modules.parse_file_or_url(content_input_path, **kwargs)
         if elements:
-            self.chunks = self.unstructured_modules.chunk_elements(
-                chunk_type=chunk_type, elements=elements
-            )
+            self.chunks = self.unstructured_modules.chunk_elements(chunk_type=chunk_type, elements=elements)
 
             # Convert chunks to a list of strings for tokenization
             tokenized_corpus = [str(chunk).split(" ") for chunk in self.chunks]
@@ -110,9 +107,7 @@ class BM25Retriever(BaseRetriever):
         if top_k <= 0:
             raise ValueError("top_k must be a positive integer.")
         if self.bm25 is None or not self.chunks:
-            raise ValueError(
-                "BM25 model is not initialized. Call `process` first."
-            )
+            raise ValueError("BM25 model is not initialized. Call `process` first.")
 
         # Preprocess query similarly to how documents were processed
         processed_query = query.split(" ")
@@ -124,16 +119,14 @@ class BM25Retriever(BaseRetriever):
         formatted_results = []
         for i in top_k_indices:
             result_dict = {
-                'similarity score': scores[i],
-                'content path': self.content_input_path,
-                'metadata': self.chunks[i].metadata.to_dict(),
-                'text': str(self.chunks[i]),
+                "similarity score": scores[i],
+                "content path": self.content_input_path,
+                "metadata": self.chunks[i].metadata.to_dict(),
+                "text": str(self.chunks[i]),
             }
             formatted_results.append(result_dict)
 
         # Sort the list of dictionaries by 'similarity score' from high to low
-        formatted_results.sort(
-            key=lambda x: x['similarity score'], reverse=True
-        )
+        formatted_results.sort(key=lambda x: x["similarity score"], reverse=True)
 
         return formatted_results

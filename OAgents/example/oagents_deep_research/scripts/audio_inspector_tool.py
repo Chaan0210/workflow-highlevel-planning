@@ -14,13 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Optional
+
+import openai
 
 from oagents import Tool
 from oagents.models import MessageRole, Model
 
-import openai
-import os
 
 class AudioInspectorTool(Tool):
     name = "inspect_file_as_audio"
@@ -58,40 +59,36 @@ This tool supports the following audio formats: [".mp3", ".m4a", ".wav"]. For ot
         client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
         try:
             with open(file_path, "rb") as audio_file:
-                transcription = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file
-                )
+                transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
             return transcription.text
         except Exception as e:
             raise RuntimeError(f"Speech recognition failed: {str(e)}") from e
 
     def forward(self, file_path: str, question: Optional[str] = None) -> str:
         self._validate_file_type(file_path)
-        
+
         try:
             transcript = self.transcribe_audio(file_path)
         except Exception as e:
             return f"Audio processing error: {str(e)}"
-        
+
         if not question:
-            return f"Audio transcription:\n{transcript[:self.text_limit]}"
+            return f"Audio transcription:\n{transcript[: self.text_limit]}"
         messages = [
             {
                 "role": MessageRole.SYSTEM,
-                "content": [{
-                    "type": "text",
-                    "text": f"Here is the an audio transcription:\n{transcript[:self.text_limit]}\n"
-                            "Answer the following question based on the audio content using the format:1. Brief answer\n2. Detailed analysis\n3. Relevant context\n\n"
-                }]
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Here is the an audio transcription:\n{transcript[: self.text_limit]}\n"
+                        "Answer the following question based on the audio content using the format:1. Brief answer\n2. Detailed analysis\n3. Relevant context\n\n",
+                    }
+                ],
             },
             {
                 "role": MessageRole.USER,
-                "content": [{
-                    "type": "text",
-                    "text": f"Please answer the question: {question}"
-                }]
-            }
+                "content": [{"type": "text", "text": f"Please answer the question: {question}"}],
+            },
         ]
-        
+
         return self.model(messages).content

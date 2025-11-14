@@ -14,11 +14,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ast
 import json
 import logging
 import os
 import random
-import uuid
+import time
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from enum import Enum
@@ -26,22 +27,17 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from huggingface_hub import InferenceClient
 from huggingface_hub.utils import is_torch_available
-from PIL import Image
-
+from json_repair import repair_json
 from openai import (
-    BadRequestError,
-    APIStatusError,
     APIConnectionError,
+    APIStatusError,
+    BadRequestError,
     OpenAIError,
 )
-import time
-import re
-import pdb
+from PIL import Image
 
 from .tools import Tool
 from .utils import _is_package_available, encode_image_base64, make_image_url
-import ast
-from json_repair import repair_json
 
 
 if TYPE_CHECKING:
@@ -64,7 +60,6 @@ class EmptyContentError(Exception):
     def __init__(self, response):
         self.response = response
         super().__init__(f"Empty content in response: {response}")
-
 
 
 def get_dict_from_nested_dataclasses(obj, ignore_key=None):
@@ -133,7 +128,7 @@ class ChatMessage:
                         **{k: v for k, v in tc["function"].items() if k != "parameters"}
                     ),
                     id=tc["id"],
-                    type=tc["type"]
+                    type=tc["type"],
                 )
                 for tc in data["tool_calls"]
             ]
@@ -771,7 +766,8 @@ class LiteLLMModel(Model):
     ) -> ChatMessage:
         try:
             import litellm
-            litellm.drop_params=True
+
+            litellm.drop_params = True
         except ModuleNotFoundError:
             raise ModuleNotFoundError(
                 "Please install 'litellm' extra to use LiteLLMModel: `pip install 'oagents[litellm]'`"
@@ -860,9 +856,10 @@ class OpenAIServerModel(Model):
         for stop_seq in stop_sequences:
             index = content.find(stop_seq)
             if index != -1:
-                content = content[:index + len(stop_seq)]
+                content = content[: index + len(stop_seq)]
                 break  # Only keep the first match
         return content
+
     def __call__(
         self,
         messages: List[Dict[str, str]],
@@ -883,19 +880,19 @@ class OpenAIServerModel(Model):
         )
 
         # Handle GPT-5 specific parameters
-        if 'gpt-5' in self.model_id.lower():
+        if "gpt-5" in self.model_id.lower():
             # Convert max_tokens to max_completion_tokens for GPT-5
-            if 'max_tokens' in completion_kwargs:
-                completion_kwargs['max_completion_tokens'] = completion_kwargs.pop('max_tokens')
-            
+            if "max_tokens" in completion_kwargs:
+                completion_kwargs["max_completion_tokens"] = completion_kwargs.pop("max_tokens")
+
             # Add reasoning_effort parameter if not provided
-            if 'reasoning_effort' not in completion_kwargs:
-                completion_kwargs['reasoning_effort'] = 'minimal'
+            if "reasoning_effort" not in completion_kwargs:
+                completion_kwargs["reasoning_effort"] = "minimal"
 
         # Check if model_id contains 'o3', 'o4', or 'gpt-5'
-        if any(model in self.model_id.lower() for model in ['o3', 'o4', 'gpt-5']):
+        if any(model in self.model_id.lower() for model in ["o3", "o4", "gpt-5"]):
             # Remove stop_sequences from completion_kwargs
-            completion_kwargs.pop('stop', None)
+            completion_kwargs.pop("stop", None)
 
         # response = self.client.chat.completions.create(**completion_kwargs)
 
@@ -908,7 +905,9 @@ class OpenAIServerModel(Model):
                 self.last_input_token_count = response.usage.prompt_tokens
                 self.last_output_token_count = response.usage.completion_tokens
 
-                if not response.choices[0].message.content and not getattr(response.choices[0].message, 'tool_calls', None):  # o1 o3-mini
+                if not response.choices[0].message.content and not getattr(
+                    response.choices[0].message, "tool_calls", None
+                ):  # o1 o3-mini
                     raise EmptyContentError(response)
 
                 message = ChatMessage.from_dict(
@@ -918,11 +917,11 @@ class OpenAIServerModel(Model):
 
                 sys_fp = response.system_fingerprint
                 logger.info(f"Response fingerprint:{sys_fp}")
-                if sys_fp and sys_fp.strip().lower() in  ['fp_ee1d74bde0', 'fp_3dfb47c1f3']:
+                if sys_fp and sys_fp.strip().lower() in ["fp_ee1d74bde0", "fp_3dfb47c1f3"]:
                     logger.warning("Warning! The response might be sent from Azure backend.")
 
                 # If model_id contains 'o3', 'o4', or 'gpt-5', manually truncate content based on stop_sequences
-                if any(model in self.model_id.lower() for model in ['o3', 'o4', 'gpt-5']):
+                if any(model in self.model_id.lower() for model in ["o3", "o4", "gpt-5"]):
                     message.content = self.truncate_content_based_on_stop_sequences(message.content, stop_sequences)
 
                 if tools_to_call_from is not None:
@@ -1003,7 +1002,6 @@ class AzureOpenAIServerModel(OpenAIServerModel):
 
 
 def add_tool_prompt(messages, tools):
-
     tool_prompt = """
     Toll Calling Requirements:
     1. When you receive a set of tool descriptions, you must generate a JSON object formatted as follows,
@@ -1019,7 +1017,7 @@ def add_tool_prompt(messages, tools):
         for tool in tools
     )
 
-    messages[0]["content"][0]['text'] += "\n\n" + tool_prompt + "\n\n" + tool_description
+    messages[0]["content"][0]["text"] += "\n\n" + tool_prompt + "\n\n" + tool_description
 
     return messages
 
@@ -1030,18 +1028,18 @@ def parse_tool_call_to_response(response):
             return ast.literal_eval(input_string)
         except (SyntaxError, ValueError):
             pass
-        
+
         try:
             return json.loads(input_string)
         except json.JSONDecodeError:
             pass
-        
+
         try:
             repaired = repair_json(input_string)
             return json.loads(repaired)
         except (json.JSONDecodeError, Exception) as e:
             raise ValueError(f"Failed to parse JSON segment: {str(e)}") from e
-        
+
     def extract_all_json(input_string):
         results = []
         stack = []
@@ -1049,20 +1047,20 @@ def parse_tool_call_to_response(response):
         i = 0
         while i < len(input_string):
             char = input_string[i]
-            if char == '{':
+            if char == "{":
                 if not stack:
                     start_index = i
                 stack.append(char)
-            elif char == '}':
+            elif char == "}":
                 if stack:
                     stack.pop()
                     if not stack:
-                        json_str = input_string[start_index:i+1]
+                        json_str = input_string[start_index : i + 1]
                         json_data = parse_json_segment(json_str)
                         results.append(json_data)
             i += 1
         return results
-        
+
     def wrap_tool_call(data):
         if isinstance(data, list):
             return [wrap_tool_call(tc) for tc in data]
@@ -1071,17 +1069,10 @@ def parse_tool_call_to_response(response):
                 return {
                     "id": f"call_{hash(json.dumps(data))}",
                     "type": "function",
-                    "function": {
-                        "name": data["name"],
-                        "arguments": json.dumps(data["arguments"])
-                    }
+                    "function": {"name": data["name"], "arguments": json.dumps(data["arguments"])},
                 }
             elif "function" in data.keys():
-                return {
-                    "id": f"call_{hash(json.dumps(data))}",
-                    "type": "function",
-                    **data
-                }
+                return {"id": f"call_{hash(json.dumps(data))}", "type": "function", **data}
             elif "tool_call" in data.keys():
                 return [wrap_tool_call(tc) for tc in data["tool_call"]]
             elif "tool_calls" in data.keys():
@@ -1094,7 +1085,7 @@ def parse_tool_call_to_response(response):
     tool_calls = []
     if json_list:
         for json_data in json_list:
-            if json_data.get('id') is not None:
+            if json_data.get("id") is not None:
                 tool_calls.append(json_data)
             else:
                 try:
@@ -1114,15 +1105,17 @@ def parse_tool_call_to_response(response):
     response.choices[0].message.tool_calls = tool_calls
     return response
 
+
 def dict_content_to_str(messages):
     def content_to_str(content):
         if content is None:
-            return ''
+            return ""
         if isinstance(content, dict):
-            return content.get('text', '')
+            return content.get("text", "")
         if isinstance(content, list):
-            return ''.join(content_to_str(c) for c in content)
+            return "".join(content_to_str(c) for c in content)
         return str(content)
+
     for message in messages:
         if "content" in message:
             message["content"] = content_to_str(message["content"])
@@ -1236,7 +1229,6 @@ class FakeToolCallOpenAIServerModel(Model):
         tools_to_call_from: Optional[List[Tool]] = None,
         **kwargs,
     ) -> ChatMessage:
-
         completion_kwargs = self._prepare_completion_kwargs(
             messages=messages,
             stop_sequences=stop_sequences,
@@ -1247,18 +1239,14 @@ class FakeToolCallOpenAIServerModel(Model):
             convert_images_to_image_urls=True,
             **kwargs,
         )
-        
+
         mid = self.model_id.lower()
         if ("ep" in mid) or ("r1" in mid):
             completion_kwargs["messages"] = dict_content_to_str(completion_kwargs["messages"])
 
         max_retries = 5
         retry_delay = 5  # seconds
-        empty_message = ChatMessage.from_dict(
-            {"role": "assistant",
-             "content": "",
-             "tool_calls": ""}
-        )
+        empty_message = ChatMessage.from_dict({"role": "assistant", "content": "", "tool_calls": ""})
         for attempt in range(max_retries):
             try:
                 response = self.client.chat.completions.create(**completion_kwargs)
@@ -1266,7 +1254,9 @@ class FakeToolCallOpenAIServerModel(Model):
                 self.last_input_token_count = response.usage.prompt_tokens if response.usage else 0
                 self.last_output_token_count = response.usage.completion_tokens if response.usage else 0
 
-                if not response.choices[0].message.content and not getattr(response.choices[0].message, 'tool_calls', None):  # o1 o3-mini
+                if not response.choices[0].message.content and not getattr(
+                    response.choices[0].message, "tool_calls", None
+                ):  # o1 o3-mini
                     raise EmptyContentError(response)
 
                 if tools_to_call_from is not None:

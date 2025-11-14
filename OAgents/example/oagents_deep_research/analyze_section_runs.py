@@ -22,7 +22,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, List, Sequence
+from typing import Iterable, Iterator, Sequence
 
 
 @dataclass
@@ -135,6 +135,7 @@ def derive_batches(
             indegree[dst] += 1
 
     frontier = [node for node, deg in indegree.items() if deg == 0]
+
     # Respect PARALLEL_LIST ordering hints when available.
     def priority(node: str) -> tuple[int, int]:
         base_idx = parallel_list.index(node) if node in parallel_list else len(parallel_list) + 1
@@ -520,9 +521,7 @@ def main() -> None:
     context_fail = sum(
         1
         for result in results
-        if result.get("status") != "no_subtasks"
-        and result.get("context")
-        and not result["context"]["context_ok"]
+        if result.get("status") != "no_subtasks" and result.get("context") and not result["context"]["context_ok"]
     )
     skipped = sum(1 for result in results if result.get("status") == "no_subtasks")
 

@@ -29,10 +29,10 @@ from rag.storages import (
 )
 from rag.utils import Constants
 
+
 if TYPE_CHECKING:
     from unstructured.documents.elements import Element
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 class VectorRetriever(BaseRetriever):
     r"""An implementation of the `BaseRetriever` by using vector storage and
@@ -63,11 +63,7 @@ class VectorRetriever(BaseRetriever):
         """
         self.embedding_model = embedding_model or OpenAIEmbedding()
         self.storage = (
-            storage
-            if storage is not None
-            else QdrantStorage(
-                vector_dim=self.embedding_model.get_output_dim()
-            )
+            storage if storage is not None else QdrantStorage(vector_dim=self.embedding_model.get_output_dim())
         )
         self.uio: UnstructuredIO = UnstructuredIO()
 
@@ -103,6 +99,7 @@ class VectorRetriever(BaseRetriever):
                 used for storing metadata. Defaults to None.
             **kwargs (Any): Additional keyword arguments for content parsing.
         """
+
         def sanitize_text(text: str):
             if not text:
                 return " "
@@ -113,12 +110,7 @@ class VectorRetriever(BaseRetriever):
         if isinstance(content, Element):
             elements = [content]
         elif isinstance(content, IOBase):
-            elements = (
-                self.uio.parse_bytes(
-                    file=content, metadata_filename=metadata_filename, **kwargs
-                )
-                or []
-            )
+            elements = self.uio.parse_bytes(file=content, metadata_filename=metadata_filename, **kwargs) or []
         elif isinstance(content, str):
             # Check if the content is URL
             parsed_url = urlparse(content)
@@ -141,9 +133,7 @@ class VectorRetriever(BaseRetriever):
                 ]
 
         if not elements:
-            warnings.warn(
-                f"No elements were extracted from the content: {content}"
-            )
+            warnings.warn(f"No elements were extracted from the content: {content}")
         else:
             # Chunk the content if required
             chunks = (
@@ -171,10 +161,7 @@ class VectorRetriever(BaseRetriever):
                     elif isinstance(content, IOBase):
                         content_path_info = {"content path": "From file bytes"}
                     elif isinstance(content, Element):
-                        content_path_info = {
-                            "content path": content.metadata.file_directory
-                            or ""
-                        }
+                        content_path_info = {"content path": content.metadata.file_directory or ""}
 
                     chunk_metadata = {"metadata": chunk.metadata.to_dict()}
                     # Remove the 'orig_elements' key if it exists
@@ -187,9 +174,7 @@ class VectorRetriever(BaseRetriever):
                         **chunk_text,
                     }
 
-                    records.append(
-                        VectorRecord(vector=vector, payload=combined_dict)
-                    )
+                    records.append(VectorRecord(vector=vector, payload=combined_dict))
 
                 self.storage.add(records=records)
 
@@ -218,7 +203,7 @@ class VectorRetriever(BaseRetriever):
             ValueError: If 'top_k' is less than or equal to 0, if vector
                 storage is empty, if payload of vector storage is None.
         """
-    
+
         if top_k <= 0:
             raise ValueError("top_k must be a positive integer.")
 
@@ -231,41 +216,30 @@ class VectorRetriever(BaseRetriever):
 
         # If no results found, raise an error
         if not query_results:
-            raise ValueError(
-                "Query result is empty, please check if "
-                "the vector storage is empty."
-            )
+            raise ValueError("Query result is empty, please check if the vector storage is empty.")
 
         if query_results[0].record.payload is None:
-            raise ValueError(
-                "Payload of vector storage is None, please check the "
-                "collection."
-            )
+            raise ValueError("Payload of vector storage is None, please check the collection.")
 
         # format the results
         formatted_results = []
         for result in query_results:
-            if (
-                result.similarity >= similarity_threshold
-                and result.record.payload is not None
-            ):
+            if result.similarity >= similarity_threshold and result.record.payload is not None:
                 result_dict = {
-                    'similarity score': str(result.similarity),
-                    'content path': result.record.payload.get(
-                        'content path', ''
-                    ),
-                    'metadata': result.record.payload.get('metadata', {}),
-                    'extra_info': result.record.payload.get('extra_info', {}),
-                    'text': result.record.payload.get('text', ''),
+                    "similarity score": str(result.similarity),
+                    "content path": result.record.payload.get("content path", ""),
+                    "metadata": result.record.payload.get("metadata", {}),
+                    "extra_info": result.record.payload.get("extra_info", {}),
+                    "text": result.record.payload.get("text", ""),
                 }
                 formatted_results.append(result_dict)
 
-        content_path = query_results[0].record.payload.get('content path', '')
+        content_path = query_results[0].record.payload.get("content path", "")
 
         if not formatted_results:
             return [
                 {
-                    'text': (
+                    "text": (
                         f"No suitable information retrieved "
                         f"from {content_path} with similarity_threshold"
                         f" = {similarity_threshold}."
@@ -274,24 +248,19 @@ class VectorRetriever(BaseRetriever):
             ]
         return formatted_results
 
-
     def _split_text(contents: str | List[str]):
-        if type(contents) == str:
-            chunks=[]
-        elif type(contents) == List:
+        if isinstance(contents, str):
+            chunks = []
+        elif isinstance(contents, list):
             chunks = []
         else:
-            print(f"[Warning] from text_splitter: Input type {type(contents)} error! Expected type to be string or List[string]")
+            print(
+                f"[Warning] from text_splitter: Input type {type(contents)} error! Expected type to be string or List[string]"
+            )
         return chunks
-    
-    def retrieve(
-            self,
-            query,
-            contents,
-            limit: int=5,
-            threshold: float=0.5
-    ):
-        '''
+
+    def retrieve(self, query, contents, limit: int = 5, threshold: float = 0.5):
+        """
         @inputs
             query: str
             contents: list[str] => raw contents
@@ -299,9 +268,9 @@ class VectorRetriever(BaseRetriever):
             threshold: float => similaraty threshold of retrieval
         @return
             str: content
-        '''
+        """
         # embed query
-        query_vector = self.embedding_model.embed(obj=query)
+        self.embedding_model.embed(obj=query)
 
         # embed contents
         for content in contents:

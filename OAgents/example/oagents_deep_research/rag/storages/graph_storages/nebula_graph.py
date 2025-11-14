@@ -15,6 +15,7 @@
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Tuple
 
+
 if TYPE_CHECKING:
     from nebula3.data.ResultSet import (  # type: ignore[import-untyped]
         ResultSet,
@@ -30,15 +31,14 @@ from rag.storages.graph_storages.graph_element import (
 )
 from rag.utils.commons import dependencies_required
 
+
 MAX_RETRIES = 5
 RETRY_DELAY = 3
 
 
 class NebulaGraph(BaseGraphStorage):
-    @dependencies_required('nebula3')
-    def __init__(
-        self, host, username, password, space, port=9669, timeout=10000
-    ):
+    @dependencies_required("nebula3")
+    def __init__(self, host, username, password, space, port=9669, timeout=10000):
         r"""Initializes the NebulaGraph client.
 
         Args:
@@ -97,17 +97,12 @@ class NebulaGraph(BaseGraphStorage):
         Raises:
             Exception: If session creation or space usage fails.
         """
-        session = self.connection_pool.get_session(
-            self.username, self.password
-        )
+        session = self.connection_pool.get_session(self.username, self.password)
         if not session:
             raise Exception("Failed to create a session")
 
         # Use the specified space
-        session.execute(
-            f"CREATE SPACE IF NOT EXISTS {self.space} "
-            "(vid_type=FIXED_STRING(30));"
-        )
+        session.execute(f"CREATE SPACE IF NOT EXISTS {self.space} (vid_type=FIXED_STRING(30));")
 
         for attempt in range(MAX_RETRIES):
             res = session.execute(f"USE {self.space};")
@@ -119,10 +114,7 @@ class NebulaGraph(BaseGraphStorage):
                 time.sleep(RETRY_DELAY)
             else:
                 # Final attempt failed, raise an exception
-                raise Exception(
-                    f"Failed to execute `{self.space}` after "
-                    f"{MAX_RETRIES} attempts: {res.error_msg()}"
-                )
+                raise Exception(f"Failed to execute `{self.space}` after {MAX_RETRIES} attempts: {res.error_msg()}")
 
     @property
     def get_client(self) -> Any:
@@ -156,12 +148,12 @@ class NebulaGraph(BaseGraphStorage):
             List[str]: A list of relationship (edge) type names.
         """
         # Query all edge types
-        result = self.query('SHOW EDGES')
+        result = self.query("SHOW EDGES")
         rel_types = []
 
         # Extract relationship type names
         for row in result.rows():
-            edge_name = row.values[0].get_sVal().decode('utf-8')
+            edge_name = row.values[0].get_sVal().decode("utf-8")
             rel_types.append(edge_name)
 
         return rel_types
@@ -178,11 +170,11 @@ class NebulaGraph(BaseGraphStorage):
         """
         nodes = self._extract_nodes(graph_elements)
         for node in nodes:
-            self.add_node(node['id'], node['type'])
+            self.add_node(node["id"], node["type"])
 
         relationships = self._extract_relationships(graph_elements)
         for rel in relationships:
-            self.add_triplet(rel['subj']['id'], rel['obj']['id'], rel['type'])
+            self.add_triplet(rel["subj"]["id"], rel["obj"]["id"], rel["type"])
 
     def ensure_edge_type_exists(
         self,
@@ -198,7 +190,7 @@ class NebulaGraph(BaseGraphStorage):
             Exception: If the edge type creation fails after multiple retry
                 attempts, an exception is raised with the error message.
         """
-        create_edge_stmt = f'CREATE EDGE IF NOT EXISTS {edge_type}()'
+        create_edge_stmt = f"CREATE EDGE IF NOT EXISTS {edge_type}()"
 
         for attempt in range(MAX_RETRIES):
             res = self.query(create_edge_stmt)
@@ -209,10 +201,7 @@ class NebulaGraph(BaseGraphStorage):
                 time.sleep(RETRY_DELAY)
             else:
                 # Final attempt failed, raise an exception
-                raise Exception(
-                    f"Failed to create tag `{edge_type}` after "
-                    f"{MAX_RETRIES} attempts: {res.error_msg()}"
-                )
+                raise Exception(f"Failed to create tag `{edge_type}` after {MAX_RETRIES} attempts: {res.error_msg()}")
 
     def ensure_tag_exists(self, tag_name: str) -> None:
         r"""Ensures a tag is created in the NebulaGraph database. If the tag
@@ -226,7 +215,7 @@ class NebulaGraph(BaseGraphStorage):
                 is raised with the error message.
         """
 
-        create_tag_stmt = f'CREATE TAG IF NOT EXISTS {tag_name}()'
+        create_tag_stmt = f"CREATE TAG IF NOT EXISTS {tag_name}()"
 
         for attempt in range(MAX_RETRIES):
             res = self.query(create_tag_stmt)
@@ -237,10 +226,7 @@ class NebulaGraph(BaseGraphStorage):
                 time.sleep(RETRY_DELAY)
             else:
                 # Final attempt failed, raise an exception
-                raise Exception(
-                    f"Failed to create tag `{tag_name}` after "
-                    f"{MAX_RETRIES} attempts: {res.error_msg()}"
-                )
+                raise Exception(f"Failed to create tag `{tag_name}` after {MAX_RETRIES} attempts: {res.error_msg()}")
 
     def add_node(
         self,
@@ -256,9 +242,7 @@ class NebulaGraph(BaseGraphStorage):
         self.ensure_tag_exists(tag_name)
 
         # Insert node without properties
-        insert_stmt = (
-            f'INSERT VERTEX IF NOT EXISTS {tag_name}() VALUES "{node_id}":()'
-        )
+        insert_stmt = f'INSERT VERTEX IF NOT EXISTS {tag_name}() VALUES "{node_id}":()'
 
         for attempt in range(MAX_RETRIES):
             res = self.query(insert_stmt)
@@ -269,10 +253,7 @@ class NebulaGraph(BaseGraphStorage):
                 time.sleep(RETRY_DELAY)
             else:
                 # Final attempt failed, raise an exception
-                raise Exception(
-                    f"Failed to add node `{node_id}` after"
-                    f" {MAX_RETRIES} attempts: {res.error_msg()}"
-                )
+                raise Exception(f"Failed to add node `{node_id}` after {MAX_RETRIES} attempts: {res.error_msg()}")
 
     def _extract_nodes(self, graph_elements: List[Any]) -> List[Dict]:
         r"""Extracts unique nodes from graph elements.
@@ -292,9 +273,9 @@ class NebulaGraph(BaseGraphStorage):
                 if node_key not in seen_nodes:
                     nodes.append(
                         {
-                            'id': node.id,
-                            'type': node.type,
-                            'properties': node.properties,
+                            "id": node.id,
+                            "type": node.type,
+                            "properties": node.properties,
                         }
                     )
                     seen_nodes.add(node_key)
@@ -314,9 +295,9 @@ class NebulaGraph(BaseGraphStorage):
         for graph_element in graph_elements:
             for rel in graph_element.relationships:
                 relationship_dict = {
-                    'subj': {'id': rel.subj.id, 'type': rel.subj.type},
-                    'obj': {'id': rel.obj.id, 'type': rel.obj.type},
-                    'type': rel.type,
+                    "subj": {"id": rel.subj.id, "type": rel.subj.type},
+                    "obj": {"id": rel.obj.id, "type": rel.obj.type},
+                    "type": rel.type,
                 }
                 relationships.append(relationship_dict)
         return relationships
@@ -341,12 +322,8 @@ class NebulaGraph(BaseGraphStorage):
 
         # Build structured_schema
         structured_schema = {
-            "node_props": {
-                el["labels"]: el["properties"] for el in node_properties
-            },
-            "rel_props": {
-                el["type"]: el["properties"] for el in rel_properties
-            },
+            "node_props": {el["labels"]: el["properties"] for el in node_properties},
+            "rel_props": {el["type"]: el["properties"] for el in rel_properties},
             "relationships": relationships,
             "metadata": {"index": index},
         }
@@ -385,12 +362,12 @@ class NebulaGraph(BaseGraphStorage):
         Returns:
             List[str]: A list of tag index names.
         """
-        result = self.query('SHOW TAG INDEXES')
+        result = self.query("SHOW TAG INDEXES")
         indexes = []
 
         # Get tag indexes
         for row in result.rows():
-            index_name = row.values[0].get_sVal().decode('utf-8')
+            index_name = row.values[0].get_sVal().decode("utf-8")
             indexes.append(index_name)
 
         return indexes
@@ -418,16 +395,11 @@ class NebulaGraph(BaseGraphStorage):
         # Avoid latenicy
         time.sleep(1)
 
-        insert_stmt = (
-            f'INSERT EDGE IF NOT EXISTS {rel}() VALUES "{subj}"->"{obj}":();'
-        )
+        insert_stmt = f'INSERT EDGE IF NOT EXISTS {rel}() VALUES "{subj}"->"{obj}":();'
 
         res = self.query(insert_stmt)
         if not res.is_succeeded():
-            raise Exception(
-                f'create relationship `]{subj}` -> `{obj}`'
-                + f'failed: {res.error_msg()}'
-            )
+            raise Exception(f"create relationship `]{subj}` -> `{obj}`" + f"failed: {res.error_msg()}")
 
     def delete_triplet(self, subj: str, obj: str, rel: str) -> None:
         r"""Deletes a specific triplet (relationship between two entities)
@@ -466,8 +438,8 @@ class NebulaGraph(BaseGraphStorage):
         """
         # Combine the outgoing and incoming edge count query
         check_query = f"""
-        (GO FROM {entity_id} OVER * YIELD count(*) as out_count) 
-        UNION 
+        (GO FROM {entity_id} OVER * YIELD count(*) as out_count)
+        UNION
         (GO FROM {entity_id} REVERSELY OVER * YIELD count(*) as in_count)
         """
 
@@ -491,24 +463,22 @@ class NebulaGraph(BaseGraphStorage):
                 element is a list of dictionaries representing node structures.
         """
         # Query all tags
-        result = self.query('SHOW TAGS')
+        result = self.query("SHOW TAGS")
         node_schema_props = []
         node_structure_props = []
 
         # Iterate through each tag to get its properties
         for row in result.rows():
-            tag_name = row.values[0].get_sVal().decode('utf-8')
-            describe_result = self.query(f'DESCRIBE TAG {tag_name}')
+            tag_name = row.values[0].get_sVal().decode("utf-8")
+            describe_result = self.query(f"DESCRIBE TAG {tag_name}")
             properties = []
 
             for prop_row in describe_result.rows():
-                prop_name = prop_row.values[0].get_sVal().decode('utf-8')
+                prop_name = prop_row.values[0].get_sVal().decode("utf-8")
                 node_schema_props.append(f"{tag_name}.{prop_name}")
                 properties.append(prop_name)
 
-            node_structure_props.append(
-                {"labels": tag_name, "properties": properties}
-            )
+            node_structure_props.append({"labels": tag_name, "properties": properties})
 
         return node_schema_props, node_structure_props
 
@@ -525,23 +495,21 @@ class NebulaGraph(BaseGraphStorage):
         """
 
         # Query all edge types
-        result = self.query('SHOW EDGES')
+        result = self.query("SHOW EDGES")
         rel_schema_props = []
         rel_structure_props = []
 
         # Iterate through each edge type to get its properties
         for row in result.rows():
-            edge_name = row.values[0].get_sVal().decode('utf-8')
-            describe_result = self.query(f'DESCRIBE EDGE {edge_name}')
+            edge_name = row.values[0].get_sVal().decode("utf-8")
+            describe_result = self.query(f"DESCRIBE EDGE {edge_name}")
             properties = []
 
             for prop_row in describe_result.rows():
-                prop_name = prop_row.values[0].get_sVal().decode('utf-8')
+                prop_name = prop_row.values[0].get_sVal().decode("utf-8")
                 rel_schema_props.append(f"{edge_name}.{prop_name}")
                 properties.append(prop_name)
 
-            rel_structure_props.append(
-                {"type": edge_name, "properties": properties}
-            )
+            rel_structure_props.append({"type": edge_name, "properties": properties})
 
         return rel_schema_props, rel_structure_props

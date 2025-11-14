@@ -1,5 +1,7 @@
 import copy
+
 from oagents.models import MessageRole, Model
+
 
 def prepare_response(original_task: str, inner_messages, reformulation_model: Model) -> str:
     messages = [

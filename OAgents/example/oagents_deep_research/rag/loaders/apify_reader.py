@@ -14,6 +14,7 @@
 import os
 from typing import TYPE_CHECKING, List, Optional
 
+
 if TYPE_CHECKING:
     from apify_client.clients import DatasetClient
 
@@ -116,9 +117,7 @@ class Apify:
         try:
             return self.client.dataset(dataset_id)
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to get dataset {dataset_id}: {e}"
-            ) from e
+            raise RuntimeError(f"Failed to get dataset {dataset_id}: {e}") from e
 
     def get_dataset(
         self,
@@ -138,9 +137,7 @@ class Apify:
         try:
             return self.get_dataset_client(dataset_id).get()
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to get dataset {dataset_id}: {e}"
-            ) from e
+            raise RuntimeError(f"Failed to get dataset {dataset_id}: {e}") from e
 
     def update_dataset(
         self,
@@ -162,9 +159,7 @@ class Apify:
         try:
             return self.get_dataset_client(dataset_id).update(name=name)
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to update dataset {dataset_id}: {e}"
-            ) from e
+            raise RuntimeError(f"Failed to update dataset {dataset_id}: {e}") from e
 
     def get_dataset_items(
         self,
@@ -185,9 +180,7 @@ class Apify:
             items = self.get_dataset_client(dataset_id).list_items().items
             return items
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to get dataset items {dataset_id}: {e}"
-            ) from e
+            raise RuntimeError(f"Failed to get dataset items {dataset_id}: {e}") from e
 
     def get_datasets(
         self,
@@ -214,10 +207,6 @@ class Apify:
             RuntimeError: If the datasets fail to be retrieved.
         """
         try:
-            return (
-                self.client.datasets()
-                .list(unnamed=unnamed, limit=limit, offset=offset, desc=desc)
-                .items
-            )
+            return self.client.datasets().list(unnamed=unnamed, limit=limit, offset=offset, desc=desc).items
         except Exception as e:
             raise RuntimeError(f"Failed to get datasets: {e}") from e

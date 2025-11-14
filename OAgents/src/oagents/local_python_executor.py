@@ -1024,10 +1024,10 @@ def get_safe_module(raw_module, dangerous_patterns, authorized_imports, visited=
             try:
                 attr_value = getattr(raw_module, attr_name)
                 setattr(safe_module, attr_name, attr_value)
-            except:
+            except Exception:
                 pass
             continue
-            
+
         # Skip dangerous patterns at any level
         if any(
             pattern in raw_module.__name__.split(".") + [attr_name]
