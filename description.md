@@ -6,7 +6,7 @@ cd ./OAgents/example/oagents_deep_research
 # 1. ----------------- Static plan -----------------
 # Level 1
 python run_gaia.py \
-  --concurrency 8 \
+  --concurrency 10 \
   --model_id gpt-5 --model_id_search gpt-5 \
   --run_name gpt-5-gaia-l1-30-react-2025-11-09 \
   --level 1 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
@@ -16,7 +16,7 @@ python run_gaia.py \
 
 # Level 2
 python run_gaia.py \
-  --concurrency 8 \
+  --concurrency 10 \
   --model_id gpt-5 --model_id_search gpt-5 \
   --run_name gpt-5-gaia-l2-30-react-2025-11-09 \
   --level 2 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
@@ -26,7 +26,7 @@ python run_gaia.py \
 
 # Level 3
 python run_gaia.py \
-  --concurrency 8 \
+  --concurrency 10 \
   --model_id gpt-5 --model_id_search gpt-5 \
   --run_name gpt-5-gaia-l3-30-react-2025-11-09 \
   --level 3 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
@@ -77,7 +77,7 @@ python run_gaia.py \
   --search_tool_reflection \
   --subtask --subtask_mode dag \
   --dynamic_update_plan \
-  --planning_interval 1
+  --planning_interval 0
 
 # Level 2
 python run_gaia.py \
@@ -88,7 +88,7 @@ python run_gaia.py \
   --search_tool_reflection \
   --subtask --subtask_mode dag \
   --dynamic_update_plan \
-  --planning_interval 1
+  --planning_interval 0
 
 # Level 3
 python run_gaia.py \
@@ -99,19 +99,80 @@ python run_gaia.py \
   --search_tool_reflection \
   --subtask --subtask_mode dag \
   --dynamic_update_plan \
-  --planning_interval 1
+  --planning_interval 0
+
+
+# 4. ----------------- Plan-then-Act + Re-planning -----------------
+# Level 1
+python run_gaia.py \
+  --concurrency 10 \
+  --model_id gpt-5 --model_id_search gpt-5 \
+  --run_name gpt5-gaia-l1-30-pta-rp-2025-10-23 \
+  --level 1 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
+  --search_tool_reflection \
+  --subtask --subtask_mode sections \
+  --planning_interval auto
+
+# Level 2
+python run_gaia.py \
+  --concurrency 10 \
+  --model_id gpt-5 --model_id_search gpt-5 \
+  --run_name gpt5-gaia-l2-30-pta-rp-2025-10-23 \
+  --level 2 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
+  --search_tool_reflection \
+  --subtask --subtask_mode sections \
+  --planning_interval auto
+
+# Level 3
+python run_gaia.py \
+  --concurrency 10 \
+  --model_id gpt-5 --model_id_search gpt-5 \
+  --run_name gpt5-gaia-l3-30-pta-rp-2025-10-23 \
+  --level 3 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
+  --search_tool_reflection \
+  --subtask --subtask_mode sections \
+  --planning_interval auto
+
+
+# 5. ----------------- Dependency Graph + Re-planning -----------------
+# Level 1
+python run_gaia.py \
+  --concurrency 10 \
+  --model_id gpt-5 --model_id_search gpt-5 \
+  --run_name gpt5-gaia-l1-30-dag-rp-2025-10-23 \
+  --level 1 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
+  --search_tool_reflection \
+  --subtask --subtask_mode dag \
+  --dynamic_update_plan \
+  --planning_interval auto
+
+# Level 2
+python run_gaia.py \
+  --concurrency 10 \
+  --model_id gpt-5 --model_id_search gpt-5 \
+  --run_name gpt5-gaia-l2-30-dag-rp-2025-10-23 \
+  --level 2 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
+  --search_tool_reflection \
+  --subtask --subtask_mode dag \
+  --dynamic_update_plan \
+  --planning_interval auto
+
+# Level 3
+python run_gaia.py \
+  --concurrency 10 \
+  --model_id gpt-5 --model_id_search gpt-5 \
+  --run_name gpt5-gaia-l3-30-dag-rp-2025-10-23 \
+  --level 3 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
+  --search_tool_reflection \
+  --subtask --subtask_mode dag \
+  --dynamic_update_plan \
+  --planning_interval auto
 ```
 
 ### GAIA benchmark evaluating
 
 ```
 python evaluate_gaia_results.py output/validation/gpt-5-gaia-level1-30tasks.jsonl
-```
-
-### Bash Script
-
-```
-python -c "import sys; print('\n'.join(sys.path))"
 ```
 
 ### 결과 저장 구조

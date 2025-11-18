@@ -117,7 +117,12 @@ def parse_args():
     parser.add_argument("--run_name", type=str, default="init_run")
     parser.add_argument("--debug", default=False, action="store_true")
     # infer params
-    parser.add_argument("--planning_interval", type=int, default=1, help="Number of rollouts per state.")
+    parser.add_argument(
+        "--planning_interval",
+        type=str,
+        default="1",
+        help="Number of steps between planning phases. Pass an integer (e.g., 2) or 'auto' to enable adaptive re-planning.",
+    )
     parser.add_argument("--max_steps", type=int, default=12, help="Maximum number of steps for ReAct agent.")
     parser.add_argument("--temperature", default=None, type=float, help="The temperature for llm generation.")
     parser.add_argument("--top_p", default=None, type=float, help="The top_p for llm generation.")
@@ -152,6 +157,16 @@ def parse_args():
     parser.add_argument("--retrieve_key_memory", action="store_true", default=False, help="Retrieve key memory")
 
     args = parser.parse_args()
+    args.auto_planning = False
+    raw_planning_interval = str(args.planning_interval).strip()
+    if raw_planning_interval.lower() == "auto":
+        args.auto_planning = True
+        args.planning_interval = 1  # placeholder; auto logic will control actual scheduling
+    else:
+        try:
+            args.planning_interval = int(raw_planning_interval)
+        except ValueError:
+            parser.error("Error: --planning_interval must be an integer or 'auto'.")
     subtask_mode_specified = args.subtask_mode is not None
     if args.subtask_mode is None:
         args.subtask_mode = "sections"
@@ -215,6 +230,8 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
     WEB_TOOLS += search_tools
 
     # Search Agent 생성
+    auto_planning_enabled = getattr(args, "auto_planning", False)
+
     text_webbrowser_agent = ToolCallingAgent(
         model=model_search,
         tools=WEB_TOOLS,
@@ -260,6 +277,7 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
         summary=args.summary,
         use_long_term_memory=args.use_long_term_memory,
         retrieve_key_memory=args.retrieve_key_memory,
+        auto_planning=auto_planning_enabled,
     )
     return manager_agent
 

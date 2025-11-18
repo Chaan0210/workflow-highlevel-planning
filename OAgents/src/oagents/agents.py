@@ -1684,6 +1684,7 @@ class CodeAgent(MultiStepAgent):
         search_type (`str`, default `none`): Types of tts method to apply.
         summary (`bool`, default `False`): Whether to use memory summary for reasoning.
         use_long_term_memory (`bool`, default `False`): Whether to use long-term memory for reasoning.
+        auto_planning (`bool`, default `False`): When True, dynamically decide when to re-plan instead of following a fixed interval.
         **kwargs: Additional keyword arguments.
 
     """
@@ -1704,6 +1705,7 @@ class CodeAgent(MultiStepAgent):
         use_long_term_memory: bool = False,
         retrieve_key_memory: bool = False,
         subtask_mode: str = "sections",  # 'sections'(Plan-then-Act) | 'dag'(Graph)
+        auto_planning: bool = False,
         **kwargs,
     ):
         self.additional_authorized_imports = additional_authorized_imports if additional_authorized_imports else []
@@ -1714,6 +1716,7 @@ class CodeAgent(MultiStepAgent):
         self.summary = summary
         self.use_long_term_memory = use_long_term_memory
         self.retrieve_key_memory = retrieve_key_memory
+        self.auto_planning = auto_planning
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.api_base = os.getenv("OPENAI_BASE_URL")
         self.client = OpenAI(api_key=self.api_key, base_url=self.api_base)
@@ -1768,11 +1771,49 @@ class CodeAgent(MultiStepAgent):
           - planning_interval=None -> 1스텝(처음)만 플랜
           - planning_interval=k -> 매 k스텝마다 플랜 (k==1이면 매 스텝)
         """
+        if getattr(self, "auto_planning", False):
+            return self._should_auto_plan(step_number)
         if self.static_plan:
             return False
         if self.planning_interval is None or self.planning_interval <= 0:
             return step_number == 1
         return (step_number % self.planning_interval) == 0
+
+    def _get_last_action_step(self) -> Optional[ActionStep]:
+        for step in reversed(self.memory.steps):
+            if isinstance(step, ActionStep):
+                return step
+        return None
+
+    def _should_auto_plan(self, step_number: int) -> bool:
+        if step_number == 1:
+            return True
+        last_action = self._get_last_action_step()
+        if last_action is None:
+            return False
+        if getattr(last_action, "error", None):
+            return True
+        observation_text = (last_action.observations or "").lower()
+        failure_keywords = (
+            "failed",
+            "error",
+            "exception",
+            "traceback",
+            "not found",
+            "unable",
+            "missing",
+            "could not",
+        )
+        if any(keyword in observation_text for keyword in failure_keywords):
+            return True
+        if hasattr(last_action, "score"):
+            try:
+                score_value = float(last_action.score) if last_action.score is not None else None
+            except (TypeError, ValueError):
+                score_value = None
+            if score_value is not None and score_value < 0:
+                return True
+        return False
 
     def embed_text(self, text: str) -> List[float]:
         try:
