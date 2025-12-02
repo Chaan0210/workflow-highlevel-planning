@@ -151,6 +151,12 @@ def parse_args():
         help='Subtask execution mode: "sections" = Plan-then-Act(순차), "dag" = Graph(DAG 의존성)',
     )
     parser.add_argument("--dynamic_update_plan", action="store_true", default=False, help="Use dynamic update plan")
+    parser.add_argument(
+        "--search_agent_plan_once",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="If enabled, the search ToolCallingAgent creates a single plan on step 1 and never re-plans. Disable to inherit the manager's planning cadence.",
+    )
     # memory params
     parser.add_argument("--summary", action="store_true", default=False, help="Summarize the current step memory")
     parser.add_argument("--use_long_term_memory", action="store_true", default=False, help="Use long-term memory")
@@ -232,12 +238,19 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
     # Search Agent 생성
     auto_planning_enabled = getattr(args, "auto_planning", False)
 
+    search_agent_planning_interval = args.planning_interval
+    search_agent_static_plan = args.static_plan
+    if args.search_agent_plan_once:
+        # Force the search agent to produce just the initial plan (planning_interval=None -> plan only at step 1)
+        search_agent_planning_interval = None
+        search_agent_static_plan = False
+
     text_webbrowser_agent = ToolCallingAgent(
         model=model_search,
         tools=WEB_TOOLS,
         max_steps=args.max_steps,
         verbosity_level=2,
-        planning_interval=args.planning_interval,
+        planning_interval=search_agent_planning_interval,
         name="search_agent",
         description="""A team member that will search the internet to answer your question.
     Ask him for all your questions that require browsing the web.
@@ -247,7 +260,7 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
     """,
         provide_run_summary=True,
         debug=debug,
-        static_plan=args.static_plan,
+        static_plan=search_agent_static_plan,
         dynamic_update_plan=args.dynamic_update_plan,
         reflection=args.reflection,
     )
