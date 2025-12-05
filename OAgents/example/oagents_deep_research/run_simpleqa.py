@@ -17,6 +17,7 @@
 # Licensed under the Apache License, Version 2.0.
 
 import argparse
+import ast
 import json
 import logging
 import os
@@ -185,27 +186,17 @@ def parse_args():
 
 # SimpleQA dataset loading
 def load_simpleqa_dataset(args):
-    dataset_root = Path("data/simpleqa") / args.split
-    metadata_path = dataset_root / "metadata.jsonl"
+    dataset_path = Path(__file__).resolve().parent / "data" / "simple_qa_test_set.csv"
 
-    if not metadata_path.exists():
-        raise FileNotFoundError(f"SimpleQA metadata not found at {metadata_path}")
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"SimpleQA CSV dataset not found at {dataset_path}")
 
-    data = []
-    with open(metadata_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                data.append(json.loads(line))
-
-    eval_df = pd.DataFrame(data)
+    eval_df = pd.read_csv(dataset_path)
 
     column_aliases = {
-        "question": ["Question", "prompt", "Prompt", "query", "Query"],
-        "true_answer": ["Final answer", "Final Answer", "final_answer", "answer", "Answer"],
-        "task": ["Level", "level", "difficulty", "Difficulty"],
-        "task_id": ["task_id", "TaskId", "Task ID", "id", "Id", "question_id"],
-        "file_name": ["file_name", "FileName", "filename", "file", "attachment", "Attachment"],
+        "question": ["problem", "prompt", "Prompt", "query", "Query", "Question"],
+        "true_answer": ["answer", "Answer", "Final answer", "Final Answer", "final_answer"],
+        "metadata": ["metadata", "Metadata"],
     }
 
     for canonical, aliases in column_aliases.items():
@@ -217,27 +208,55 @@ def load_simpleqa_dataset(args):
                 break
 
     if "question" not in eval_df.columns or "true_answer" not in eval_df.columns:
-        raise ValueError("SimpleQA metadata must contain 'question' and 'true_answer' fields.")
+        raise ValueError("SimpleQA dataset must contain 'problem'/'question' and 'answer'/'true_answer' columns.")
 
-    if "task_id" not in eval_df.columns:
-        eval_df["task_id"] = [f"simpleqa_{idx}" for idx in range(len(eval_df))]
+    if "metadata" not in eval_df.columns:
+        eval_df["metadata"] = None
 
-    if "task" not in eval_df.columns:
-        eval_df["task"] = 1
+    def normalize_metadata(value):
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                return ast.literal_eval(value)
+            except (ValueError, SyntaxError):
+                return {"raw": value}
+        return {}
 
-    if "file_name" not in eval_df.columns:
-        eval_df["file_name"] = ""
+    eval_df["metadata"] = eval_df["metadata"].apply(normalize_metadata)
 
-    def preprocess_file_paths(row):
-        file_name = row.get("file_name")
-        if isinstance(file_name, str) and file_name.strip():
-            row["file_name"] = str(dataset_root / file_name)
-        else:
-            row["file_name"] = ""
-        return row
+    eval_df["task_id"] = [f"simpleqa_{idx}" for idx in range(len(eval_df))]
+    eval_df["task"] = 1
+    eval_df["file_name"] = ""
 
-    eval_df = eval_df.apply(preprocess_file_paths, axis=1)
     return eval_df
+
+
+def enforce_concise_answer(raw_answer: str, max_chars: int = 196) -> str:
+    """Make sure the final response is a short, single-line answer."""
+    if not raw_answer:
+        return raw_answer
+
+    cleaned = raw_answer.strip()
+    final_answer_patterns = [
+        r"final answer\s*[:\-]",
+        r"answer\s*[:\-]",
+        r"prediction\s*[:\-]",
+        r"response\s*[:\-]",
+    ]
+
+    for pattern in final_answer_patterns:
+        match = re.search(pattern, cleaned, re.IGNORECASE | re.DOTALL)
+        if match:
+            cleaned = cleaned[match.end() :].strip()
+            break
+
+    cleaned = cleaned.split("\n")[0].strip()
+
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars].rstrip()
+
+    return cleaned
 
 
 # Agent 계층 구조 생성
@@ -382,10 +401,9 @@ def answer_single_question(example, args, model_id, model_id_search, answers_fil
     agent = create_agent_hierarchy(model, model_search, args, debug)
 
     # 질문 증강
-    augmented_question = """You have one question to answer. It is paramount that you provide a correct answer.
-Give it all you can: I know for a fact that you have access to all the relevant tools to solve it and find the correct answer (the answer does exist).
-Failure or 'I cannot answer' or 'None found' will not be tolerated, success will be rewarded.
-Run verification steps if that's needed, you must make sure you find the correct answer!
+    augmented_question = """You are a SimpleQA assistant. Provide a single concise final answer (ideally a short phrase or number) with no explanation.
+You must run every necessary verification step before answering. If you cannot verify the answer with high confidence, respond exactly with "I don't know".
+Give the task everything you have: you have access to all the relevant tools to find the correct answer.
 Here is the task:
 """ + example["question"]
 
@@ -457,7 +475,7 @@ Here is the task:
 
         # 응답 재구성
         final_result = prepare_response(augmented_question, agent_memory, reformulation_model=model)
-        output = str(final_result)
+        output = enforce_concise_answer(str(final_result))
 
         logger.info(f"✅ Final Answer: {output[:200]}..." if len(output) > 200 else f"✅ Final Answer: {output}")
 

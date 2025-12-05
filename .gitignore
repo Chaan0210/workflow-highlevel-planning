@@ -142,10 +142,6 @@ savedir/
 output/
 tool_output/
 
-# Claude
-CLAUDE.md
-.claude
-
 # Codex
 AGENTS.md
 
