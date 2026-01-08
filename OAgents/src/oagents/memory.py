@@ -83,6 +83,7 @@ class ActionStep(MemoryStep):
     action_output: Any = None
     score: float = 0.0
     evaluate_thought: str | None = None
+    should_replan: bool | None = None
 
     def dict(self):
         # We overwrite the method to parse the tool_calls and action_output manually
@@ -100,6 +101,7 @@ class ActionStep(MemoryStep):
             "action_output": make_json_serializable(self.action_output),
             "score": self.score,
             "evaluate_thought": self.evaluate_thought,
+            "should_replan": self.should_replan,
         }
 
     def to_messages(

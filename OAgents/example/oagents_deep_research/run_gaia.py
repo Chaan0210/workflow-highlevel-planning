@@ -240,7 +240,7 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
 
     search_agent_planning_interval = args.planning_interval
     search_agent_static_plan = args.static_plan
-    if args.search_agent_plan_once:
+    if args.search_agent_plan_once and not args.static_plan:
         # Force the search agent to produce just the initial plan (planning_interval=None -> plan only at step 1)
         search_agent_planning_interval = None
         search_agent_static_plan = False

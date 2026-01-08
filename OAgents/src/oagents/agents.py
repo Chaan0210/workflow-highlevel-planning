@@ -373,6 +373,15 @@ class MultiStepAgent:
             messages.extend(memory_step.to_messages(summary_mode=summary_mode, summary=self.summary))
         return messages
 
+    def _sync_memory_steps(self, updated_steps: Optional[List[ActionStep | PlanningStep | TaskStep]]) -> None:
+        """
+        Ensure `self.memory` reflects the latest working trajectory so that planning / logging logic
+        can inspect up-to-date steps even when strategies operate on detached copies.
+        """
+        if updated_steps is None:
+            return
+        self.memory.steps = list(updated_steps)
+
     def visualize(self):
         """Creates a rich tree visualization of the agent's structure."""
         self.logger.visualize_agent_tree(self)
@@ -583,20 +592,38 @@ class MultiStepAgent:
         input_messages = [facts_update_pre_messages] + memory_messages + [facts_update_post_messages]
         chat_message_facts: ChatMessage = self.model(input_messages)
         facts_update = chat_message_facts.content
+        plan_template_key = "reflection_plan_pre_messages"
+        variables = {
+            "task": task,
+            "tools": self.tools,
+            "managed_agents": self.managed_agents,
+            "trajectory": answer_message,
+            "analysis": evaluate_thought,
+        }
+        if getattr(self, "subtask", False):
+            plan_template_key = "reflection_plan_pre_messages_with_subtask"
+            if getattr(self, "subtask_mode", "sections") == "sections":
+                mode_hint = (
+                    "### MODE: SECTIONS (Plan-then-Act)\n"
+                    "- DO NOT include ##DAG_LIST.\n"
+                    "- Provide ##PARALLEL_LIST as the **exact execution order** of sections.\n"
+                    "- Provide ##ST1, ##ST2, ... blocks with clear 'steps'.\n"
+                )
+            else:
+                mode_hint = (
+                    "### MODE: DAG (Graph)\n"
+                    "- Include ##DAG_LIST with all dependencies.\n"
+                    "- Provide ##PARALLEL_LIST with nodes that have no prerequisites.\n"
+                )
+            variables["mode_hint"] = mode_hint
         update_plan_pre_messages = {
             "role": MessageRole.SYSTEM,
             "content": [
                 {
                     "type": "text",
                     "text": populate_template(
-                        self.prompt_templates["planning"]["reflection_plan_pre_messages"],
-                        variables={
-                            "task": task,
-                            "tools": self.tools,
-                            "managed_agents": self.managed_agents,
-                            "trajectory": answer_message,
-                            "analysis": evaluate_thought,
-                        },
+                        self.prompt_templates["planning"][plan_template_key],
+                        variables=variables,
                     ),
                 }
             ],
@@ -736,10 +763,16 @@ class MultiStepAgent:
                         "### MODE: SECTIONS (Plan-then-Act)\n"
                         "- DO NOT include ##DAG_LIST.\n"
                         "- Provide ##PARALLEL_LIST as the **exact execution order** of sections.\n"
-                        "- Provide ##ST1, ##ST2, ... blocks with clear 'steps'.\n"
+                        "- Format ##PARALLEL_LIST as comma-separated ST ids without brackets (e.g., ST1, ST2).\n"
+                        "- Provide ##ST1, ##ST2, ... blocks with clear numbered steps.\n"
                     )
                 else:
-                    preface = "### MODE: DAG (Graph)\n- Include ##DAG_LIST with all dependencies.\n"
+                    preface = (
+                        "### MODE: DAG (Graph)\n"
+                        "- Include ##DAG_LIST with all dependencies.\n"
+                        "- Provide ##PARALLEL_LIST with nodes that have no prerequisites.\n"
+                        "- Format ##PARALLEL_LIST as comma-separated ST ids without brackets (e.g., ST1, ST2).\n"
+                    )
                 return preface + "\n" + body
             # 기본(비서브태스크) 초기 계획
             template = self.prompt_templates["planning"]["initial_plan"]
@@ -781,9 +814,15 @@ class MultiStepAgent:
                 MessageRole.SYSTEM, self.prompt_templates["planning"]["update_plan_pre_messages"], task
             )
             mode_hint = (
-                "### MODE: SECTIONS\n- Update **##PARALLEL_LIST** as the execution order.\n- Keep **NO ##DAG_LIST**.\n"
+                "### MODE: SECTIONS\n"
+                "- Update **##PARALLEL_LIST** as the execution order.\n"
+                "- Format ##PARALLEL_LIST as comma-separated ST ids without brackets (e.g., ST1, ST2).\n"
+                "- Keep **NO ##DAG_LIST**.\n"
                 if getattr(self, "subtask_mode", "sections") == "sections"
-                else "### MODE: DAG\n- Keep **##DAG_LIST** consistent with dependencies.\n"
+                else "### MODE: DAG\n"
+                "- Keep **##DAG_LIST** consistent with dependencies.\n"
+                "- Provide ##PARALLEL_LIST with nodes that have no prerequisites.\n"
+                "- Format ##PARALLEL_LIST as comma-separated ST ids without brackets (e.g., ST1, ST2).\n"
             )
             body = populate_template(
                 self.prompt_templates["planning"]["update_plan_post_messages_with_subtask"],
@@ -954,11 +993,17 @@ class MultiStepAgent:
                     "### MODE: SECTIONS (Plan-then-Act)\n"
                     "- DO NOT include ##DAG_LIST.\n"
                     "- Provide ##PARALLEL_LIST as the **exact execution order** of sections.\n"
-                    "- Provide ##ST1, ##ST2, ... blocks with clear 'steps'.\n"
+                    "- Format ##PARALLEL_LIST as comma-separated ST ids without brackets (e.g., ST1, ST2).\n"
+                    "- Provide ##ST1, ##ST2, ... blocks with clear numbered steps.\n"
                 )
             else:
                 # DAG 모드: 기존 템플릿대로 DAG_LIST  PARALLEL_LIST  ST 블록 생성
-                preface = "### MODE: DAG (Graph)\n- Include ##DAG_LIST with all dependencies.\n"
+                preface = (
+                    "### MODE: DAG (Graph)\n"
+                    "- Include ##DAG_LIST with all dependencies.\n"
+                    "- Provide ##PARALLEL_LIST with nodes that have no prerequisites.\n"
+                    "- Format ##PARALLEL_LIST as comma-separated ST ids without brackets (e.g., ST1, ST2).\n"
+                )
             initial_plan_template = preface + "\n" + base
         else:
             initial_plan_template = populate_template(
@@ -1041,10 +1086,16 @@ class MultiStepAgent:
                 mode_hint = (
                     "### MODE: SECTIONS\n"
                     "- Update **##PARALLEL_LIST** as the execution order.\n"
+                    "- Format ##PARALLEL_LIST as comma-separated ST ids without brackets (e.g., ST1, ST2).\n"
                     "- Keep **NO ##DAG_LIST**.\n"
                 )
             else:
-                mode_hint = "### MODE: DAG\n- Keep **##DAG_LIST** consistent with dependencies.\n"
+                mode_hint = (
+                    "### MODE: DAG\n"
+                    "- Keep **##DAG_LIST** consistent with dependencies.\n"
+                    "- Provide ##PARALLEL_LIST with nodes that have no prerequisites.\n"
+                    "- Format ##PARALLEL_LIST as comma-separated ST ids without brackets (e.g., ST1, ST2).\n"
+                )
             body = populate_template(
                 self.prompt_templates["planning"]["update_plan_post_messages_with_subtask"],
                 variables={
@@ -1793,6 +1844,8 @@ class CodeAgent(MultiStepAgent):
             return False
         if getattr(last_action, "error", None):
             return True
+        if getattr(last_action, "should_replan", False):
+            return True
         observation_text = (last_action.observations or "").lower()
         failure_keywords = (
             "failed",
@@ -1930,8 +1983,14 @@ class CodeAgent(MultiStepAgent):
             raise AgentExecutionError(error_msg, self.logger)
 
     def _parse_plan(self, raw_plan):
-        parallel_section = re.search(r"##PARALLEL_LIST\n([ST\d,\s]+)", raw_plan)
-        parallel_list = [x.strip() for x in parallel_section.group(1).split(",")] if parallel_section else []
+        parallel_section = re.search(r"##PARALLEL_LIST\n([ST\d,\s\[\]]+)", raw_plan)
+        if parallel_section:
+            raw_parallel = parallel_section.group(1).strip().strip("[]").strip()
+            parallel_list = [x.strip() for x in raw_parallel.split(",") if x.strip()]
+            if len(parallel_list) == 1 and " " in parallel_list[0]:
+                parallel_list = [x for x in parallel_list[0].split() if x]
+        else:
+            parallel_list = []
 
         subtask_dict = {}
 
@@ -1952,24 +2011,68 @@ class CodeAgent(MultiStepAgent):
 
         # DAG_LIST 파싱: [(ST1, ST3), (ST2, ST4)] 형식
         dag_edges = []
+        dag_list_present = False
+        dag_parse_failed = False
         dag_match = re.search(r"##DAG_LIST\n(.*?)(?=##|\Z)", raw_plan, flags=re.DOTALL)
         if dag_match:
+            dag_list_present = True
             import ast
 
             dag_block = dag_match.group(1).strip()
-            if dag_block:
+            if not dag_block:
+                dag_parse_failed = True
+            else:
                 # Allow legacy plans that omitted quotes around ST identifiers by inserting them pre-parse.
                 dag_block = re.sub(r"(?<!['\"])(ST\d+)(?!['\"])", r"'\1'", dag_block)
-            try:
-                dag_edges = ast.literal_eval(dag_block)
-                dag_edges = [(str(a).strip(), str(b).strip()) for (a, b) in dag_edges]
-            except Exception:
-                dag_edges = []
-        return parallel_list, subtask_dict, dag_edges
+                try:
+                    dag_edges = ast.literal_eval(dag_block)
+                    dag_edges = [(str(a).strip(), str(b).strip()) for (a, b) in dag_edges]
+                except Exception:
+                    dag_edges = []
+                    dag_parse_failed = True
+        return parallel_list, subtask_dict, dag_edges, dag_list_present, dag_parse_failed
 
     def _schedule_and_execute_subtasks(self, memory_step, plan_content, memory_messages, memory_steps):
-        parallel_list, subtask_dict, dag_edges = self._parse_plan(plan_content)
         mode = getattr(self, "subtask_mode", "sections")
+        max_dag_replans = 1
+        dag_replans = 0
+        while True:
+            parallel_list, subtask_dict, dag_edges, dag_list_present, dag_parse_failed = self._parse_plan(plan_content)
+            if mode == "dag":
+                dag_invalid_reason = None
+                if not subtask_dict:
+                    dag_invalid_reason = "Missing subtask blocks (##STx)."
+                elif not dag_list_present:
+                    dag_invalid_reason = "Missing ##DAG_LIST."
+                elif dag_parse_failed:
+                    dag_invalid_reason = "Invalid ##DAG_LIST syntax."
+                else:
+                    unknown_edges = [
+                        (a, b) for (a, b) in dag_edges if a not in subtask_dict or b not in subtask_dict
+                    ]
+                    if unknown_edges:
+                        dag_invalid_reason = f"Unknown DAG nodes in edges: {unknown_edges}"
+                if dag_invalid_reason:
+                    if dag_replans >= max_dag_replans:
+                        raise AgentParsingError(
+                            f"DAG plan invalid for dag mode: {dag_invalid_reason}", self.logger
+                        )
+                    dag_replans += 1
+                    replanning_step = self.planning_step(
+                        self.task,
+                        is_first_step=False,
+                        step=memory_step.step_number,
+                    )
+                    if replanning_step is not None:
+                        memory_steps.append(replanning_step)
+                        self._sync_memory_steps(memory_steps)
+                        memory_messages = self.write_memory_to_messages(memory_steps=memory_steps)
+                        if getattr(replanning_step, "model_output_message_plan", None):
+                            plan_content = replanning_step.model_output_message_plan.content
+                        else:
+                            plan_content = replanning_step.plan
+                    continue
+            break
 
         def _format_missing_env_hint(message: str) -> Optional[str]:
             patterns = (
@@ -1996,7 +2099,7 @@ class CodeAgent(MultiStepAgent):
         if not all_nodes:
             return False, []
 
-        if mode == "sections" or not dag_edges:
+        if mode == "sections":
             # 섹션: PARALLEL_LIST 순서로 1개씩 실행(없으면 ST 번호순)
             seq = parallel_list if parallel_list else sorted(all_nodes, key=lambda s: int(s[2:]))
             for st in seq:
@@ -2471,6 +2574,14 @@ class CodeAgent(MultiStepAgent):
             raise ValueError(f"Unknown search type: {self.search_type}")
 
     def _create_planning_step(self, task: str, step_number: int, additional_knowledge: Optional[str] = None):
+        if getattr(self, "auto_planning", False) and self.reflection and step_number > 1:
+            last_action = self._get_last_action_step()
+            answer_message = self.get_memory_step_message(self.memory.steps, None)
+            evaluate_thought = getattr(last_action, "evaluate_thought", "") if last_action else ""
+            planning_step = self.reflect_planing(task, answer_message, evaluate_thought)
+            if planning_step is not None:
+                self.logger.log_rule(f"Step {step_number}", level=LogLevel.INFO)
+            return planning_step
         planning_step = self.planning_step(
             task, is_first_step=(step_number == 1), step=step_number, additional_knowledge=additional_knowledge
         )
@@ -2573,6 +2684,7 @@ class CodeAgent(MultiStepAgent):
             planning_step = self._create_planning_step(task, self.step_number, additional_knowledge)
             if planning_step is not None:
                 memory_steps.append(planning_step)
+                self._sync_memory_steps(memory_steps)
 
             memory_messages = self.write_memory_to_messages(memory_steps=memory_steps)
             step_number = self.step_number
@@ -2607,6 +2719,7 @@ class CodeAgent(MultiStepAgent):
         base_memory_steps = memory_steps.copy()
         if planning_step is not None:
             base_memory_steps.append(planning_step)
+            self._sync_memory_steps(base_memory_steps)
         task_success = False
         evaluate = True
         while not task_success and self.step_number <= self.max_steps:
@@ -2641,6 +2754,7 @@ class CodeAgent(MultiStepAgent):
         planning_step = self._create_planning_step(task, self.step_number, additional_knowledge)
         if planning_step is not None:
             memory_steps.append(planning_step)
+            self._sync_memory_steps(memory_steps)
         base_memory_steps = memory_steps.copy()
         beam_size = 2
         nodes_list = [base_memory_steps, copy.deepcopy(base_memory_steps)]  # beamsize default2
@@ -2739,6 +2853,7 @@ class CodeAgent(MultiStepAgent):
                 planning_step = self._create_planning_step(task, self.step_number, additional_knowledge)
                 if planning_step is not None:
                     memory_steps.append(planning_step)
+                    self._sync_memory_steps(memory_steps)
                     current_memory_messages = self.write_memory_to_messages(memory_steps=memory_steps)
             try:
                 if not reflection:
@@ -2841,6 +2956,7 @@ class CodeAgent(MultiStepAgent):
 
         final_answer = None
         evaluation_score = float("-inf")
+        should_replan = False
 
         try:
             evaluation_content = ""
@@ -2869,9 +2985,13 @@ class CodeAgent(MultiStepAgent):
                 system_prompt = self.PRM_prompt
 
             if evaluate:
-                evaluation_score, evaluation_content = evaluate_answer(answer_message, system_prompt, mode)
+                eval_result = evaluate_answer(answer_message, system_prompt, mode)
+                if eval_result is None:
+                    evaluation_score, evaluation_content, should_replan = 0.0, "", False
+                else:
+                    evaluation_score, evaluation_content, should_replan = eval_result
             else:
-                evaluation_score, evaluation_content = 0.0, ""
+                evaluation_score, evaluation_content, should_replan = 0.0, "", False
 
             if self.reflection and evaluation_score <= self.reflection_threshold:
                 reflection = evaluate_answer(answer_message, self.REFLECTION_prompt, mode="reflection")
@@ -2880,16 +3000,19 @@ class CodeAgent(MultiStepAgent):
             memory_step.error = e
             evaluation_score = 0.0
             evaluation_content = ""
+            should_replan = False
 
         finally:
             setattr(memory_step, "score", evaluation_score)
             setattr(memory_step, "evaluate_thought", evaluation_content)
+            setattr(memory_step, "should_replan", should_replan)
 
             memory_step.end_time = time.time()
             memory_step.duration = memory_step.end_time - step_start_time
 
             memory_messages.extend(memory_step.to_messages(summary=self.summary))
             memory_steps.append(memory_step)
+            self._sync_memory_steps(memory_steps)
 
             for callback in self.step_callbacks:
                 sig_params = inspect.signature(callback).parameters

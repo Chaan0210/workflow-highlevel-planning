@@ -43,5 +43,7 @@ prompt: |-
   ```json
   {
     "score": [integer, either 0 or 1],
-    "analysis": "Concise reasoning explaining why the answer is considered successful (1) or a failure (0). Include specific observations about completeness, correctness, ambiguity, contradictions, or errors."
+    "analysis": "Concise reasoning explaining why the answer is considered successful (1) or a failure (0). Include specific observations about completeness, correctness, ambiguity, contradictions, or errors.",
+    "should_replan": [boolean, set to true ONLY if score is 0 or if the answer indicates the plan was invalid. Otherwise false.]
   }
+  ```

@@ -90,9 +90,9 @@ async def async_evaluate_answer(text: str, system_prompt: str, mode: str = "PRM"
 
         if mode in ("ORM", "PRM"):
             result = parse_first_valid_json(content)
-            return result.get("score", 0), result.get("analysis", "")
+            return result.get("score", 0), result.get("analysis", ""), result.get("should_replan", False)
 
-        elif mode == "ORM-list-wise" or "PRM-list-wise":
+        elif mode in ("ORM-list-wise", "PRM-list-wise"):
             result = parse_first_valid_json(content)
             return result.get("analysis", ""), result.get("index", 0)
 
@@ -122,7 +122,7 @@ def evaluate_answer(text: str, system_prompt: str, mode: str = "PRM") -> Any:
 
         if mode in ("ORM", "PRM"):
             result = parse_first_valid_json(content)
-            return result.get("score", 0), result.get("analysis", "")
+            return result.get("score", 0), result.get("analysis", ""), result.get("should_replan", False)
         elif mode in ("ORM-list-wise", "PRM-list-wise"):
             result = parse_first_valid_json(content)
             return result.get("analysis", ""), result.get("index", 0)

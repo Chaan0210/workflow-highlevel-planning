@@ -206,7 +206,7 @@ planning:
     {{task}}
     ```
     Now begin!
-  initial_plan : |-
+  initial_plan: |-
     You are a world expert at making efficient plans to solve any task using a set of carefully crafted tools.
 
     Now for the given task, develop a step-by-step high-level plan taking into account the above inputs and list of facts.
@@ -244,14 +244,14 @@ planning:
     ```
 
     Now begin! Write your plan below.
-  initial_plan_with_knowledge : |-
+  initial_plan_with_knowledge: |-
     You are a world expert at making efficient plans to solve any task using a set of carefully crafted tools.
 
     Now for the given task, develop a step-by-step high-level plan taking into account the above inputs and list of facts.
     This plan should involve individual tasks based on the available tools, that if executed correctly will yield the correct answer.
     Do not skip steps, do not add any superfluous steps. Only write the high-level plan, DO NOT DETAIL INDIVIDUAL TOOL CALLS.
     After writing the final step of the plan, write the '\n<end_plan>' tag and stop there.
-    
+
     Here is your task:
 
     Task:
@@ -283,35 +283,25 @@ planning:
     ```
     {{knowledge_data}}
     ```
-    
+
     Now begin! Write your plan below.
-  initial_plan_with_subtask : |-
+  initial_plan_with_subtask: |-
     You are a world expert at making efficient plans to solve any task using a set of carefully crafted tools.
 
-    For the given task, you will analyze whether it can be effectively broken down into independent subtasks:
-    - If the task is more cohesive and cannot be efficiently divided (or would create artificial, highly dependent subtasks), you will treat it as a single task with one comprehensive plan.
-    - ELSE if the task can be logically divided into subtasks, you will break it down and provide a separate plan for each subtask.
-    - Only give the plan, without any explanations or other text.
+    Always decompose the task into multiple subtasks and output the plan using ##ST tags. Do NOT output a single flat plan.
+    Follow the MODE instructions at the top of this prompt for whether to include ##DAG_LIST and how to format ##PARALLEL_LIST.
+    Format ##PARALLEL_LIST as a comma-separated list of ST ids without brackets (e.g., "ST1, ST2").
+    Only give the plan, without any explanations or other text.
 
-    IF given task cannot be effectively divided, you will:
-    - Provide just one plan without the subtask structure.
-    - You will format your response as follows:
-      1. [First step]
-      2. [Second step]
-      ...
-
-    ELSE if given task can be broken down into subtasks, you will:
+    You will:
     - Identify all subtasks needed to complete the overall task.
-    - Define ALL subtask dependencies in ##DAG_LIST using tuples('ST_A', 'ST_B') to indicate ST_B depends on ST_A. Always quote the subtask identifiers so the list is valid Python syntax.
-    - Based on these dependencies, determine which subtasks have no prerequisites and can start immediately.
-    - Provide ##PARALLEL_LIST containing ONLY subtask indices that have no dependencies in the DAG.
     - Provide a complete step-by-step plan for each subtask.
     - For any dependent subtask, explicitly state its dependencies in its first step.
-    - You will format your response as follows:
-      ##DAG_LIST
-      [('ST_A', 'ST_B'), ('ST_C', 'ST_D'), ...]
+    - Use the following structure:
+      ##DAG_LIST (include only if MODE requires it)
+      [('ST1', 'ST2'), ('ST2', 'ST3'), ...]
       ##PARALLEL_LIST
-      [subtask indices have no prerequisites and can start immediately joined by commas]
+      ST1, ST2, ...
       ##ST1:[subtask description]
       1. [First step]
       2. [Second step]
@@ -358,11 +348,6 @@ planning:
     ```
     {{answer_facts}}
     ```
-    ONE PLAN EXAMPLE:
-    1. xxx.  
-    2. xxx.  
-    3. xxx.
-    ...
 
     SUBTASKS EXAMPLE:
     ##DAG_LIST
@@ -487,10 +472,12 @@ planning:
     ```
 
     Strictly follow these structural rules:
-    Analyze whether it can be effectively broken down into independent subtasks:
-    - If the task can be logically divided into subtasks with no dependencies, you will break it down and provide a separate plan for each subtask.
-    - If the task is more cohesive and cannot be efficiently divided (or would create artificial, highly dependent subtasks), you will treat it as a single task with one comprehensive plan.
+    - You must ALWAYS maintain the subtask structure using ##ST tags.
+    - Even if the remaining task is simple, encapsulate it within a single ##ST1 block.
+    - Do NOT output a single flat plan without ##ST tags.
     - Only give the plan, without any explanations or other text.
+    - Always include ##PARALLEL_LIST as a comma-separated list of ST ids without brackets (e.g., "ST1, ST2").
+    - Use numbered steps (1., 2., 3.) under each ##ST block.
 
     When breaking down into subtasks, you will:
     - Explicitly state dependencies between subtasks.
@@ -499,9 +486,9 @@ planning:
 
     You will format each subtask as follows:
     ##STX[subtask description] (where X is the subtask number)
-    [Step-by-step plan for this subtask]
-
-    If the task cannot be effectively divided, you will provide just on plan without the subtask structure.
+    1. [First step]
+    2. [Second step]
+    ...
 
     Now write your new plan below.
   update_plan_post_messages_with_knowledge: |-
@@ -601,28 +588,79 @@ planning:
     After writing the final step of the plan, write the '\n<end_plan>' tag and stop there.
 
     Now write your new plan below.
+
+  reflection_plan_pre_messages_with_subtask: |-
+    You are an elite problem-solving strategist with exceptional analytical capabilities and deep expertise in structured planning methodologies. Your specialized skill is redesigning solution paths after analyzing previous attempts.
+    ## Task Overview
+    You have been assigned the following challenge:
+    ```
+    {{task}}
+    ```
+    ## Available Resources
+    You can leverage these tools:
+    {%- for tool in tools.values() %}
+    - {{ tool.name }}: {{ tool.description }}
+        Takes inputs: {{tool.inputs}}
+        Returns an output of type: {{tool.output_type}}
+    {%- endfor %}
+
+    {%- if managed_agents and managed_agents.values() | list %}
+    You can also give tasks to team members:
+    {%- for agent in managed_agents.values() %}
+    - {{ agent.name }}: {{ agent.description }}
+    {%- endfor %}
+    Remember that when delegating to a human team member, provide comprehensive instructions with all necessary details.
+    {%- else %}
+    {%- endif %}
+
+    ## Analysis of Previous Attempts
+    Below is a comprehensive record of the solution trajectory attempted thus far, along with a detailed analysis of its effectiveness:
+
+    **Previous Trajectory:**
+    {{trajectory}}
+
+    **Analysis of Previous Approach:**
+    {{analysis}}
+
+    ## Your Assignment: Strategic Reflection & Plan Redesign
+
+    Based on the information provided, develop a refined strategic approach that will successfully resolve this task.
+
+    {{mode_hint}}
+
+    ## Output Format
+    1. Output must be in structured subtask format using ##ST blocks.
+    2. Do NOT output a flat numbered plan.
+    3. Always include ##PARALLEL_LIST as a comma-separated list of ST ids without brackets (e.g., "ST1, ST2").
+    4. Provide a complete step-by-step plan for each subtask using numbered steps (1., 2., 3.) and keep steps concise.
+    5. Do NOT detail individual tool calls, only high-level steps.
+
+    After writing the final step of the plan, write the '\n<end_plan>' tag and stop there.
+
+    Now write your new plan below.
+
   reflection_plan_post_messages: |-
 
 managed_agent:
   task: |-
-      You're a helpful agent named '{{name}}'.
-      You have been submitted this task by your manager.
-      ---
-      Task:
-      {{task}}
-      ---
-      You're helping your manager solve a wider task: so make sure to not provide a one-line answer, but give as much information as possible to give them a clear understanding of the answer.
+    You're a helpful agent named '{{name}}'.
+    You have been submitted this task by your manager.
+    ---
+    Task:
+    {{task}}
+    ---
+    You're helping your manager solve a wider task: so make sure to not provide a one-line answer, but give as much information as possible to give them a clear understanding of the answer.
 
-      Your final_answer WILL HAVE to contain these parts:
-      ### 1. Task outcome (short version):
-      ### 2. Task outcome (extremely detailed version):
-      ### 3. Additional context (if relevant):
+    Your final_answer WILL HAVE to contain these parts:
+    ### 1. Task outcome (short version):
+    ### 2. Task outcome (extremely detailed version):
+    ### 3. Additional context (if relevant):
 
-      Put all these in your final_answer tool, everything that you do not pass as an argument to final_answer will be lost.
-      And even if your task resolution is not successful, please return as much context as possible, so that your manager can act upon this feedback.
+    Put all these in your final_answer tool, everything that you do not pass as an argument to final_answer will be lost.
+    And even if your task resolution is not successful, please return as much context as possible, so that your manager can act upon this feedback.
   report: |-
-      Here is the final answer from your managed agent '{{name}}':
-      {{final_answer}}
+    Here is the final answer from your managed agent '{{name}}':
+    {{final_answer}}
 final_answer:
   pre_messages: |-
     An agent tried to answer a user query but it got stuck and failed to do so. You are tasked with providing an answer instead. Here is the agent's memory:
