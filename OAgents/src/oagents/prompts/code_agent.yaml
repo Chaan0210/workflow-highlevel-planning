@@ -491,6 +491,7 @@ planning:
     ...
 
     Now write your new plan below.
+    After writing the final step of the plan, write the '\n<end_plan>' tag and stop there.
   update_plan_post_messages_with_knowledge: |-
     You're still working towards solving this task:
     ```

@@ -1983,12 +1983,10 @@ class CodeAgent(MultiStepAgent):
             raise AgentExecutionError(error_msg, self.logger)
 
     def _parse_plan(self, raw_plan):
-        parallel_section = re.search(r"##PARALLEL_LIST\n([ST\d,\s\[\]]+)", raw_plan)
+        parallel_section = re.search(r"##PARALLEL_LIST\n(.*?)(?=##|\Z)", raw_plan, flags=re.DOTALL)
         if parallel_section:
-            raw_parallel = parallel_section.group(1).strip().strip("[]").strip()
-            parallel_list = [x.strip() for x in raw_parallel.split(",") if x.strip()]
-            if len(parallel_list) == 1 and " " in parallel_list[0]:
-                parallel_list = [x for x in parallel_list[0].split() if x]
+            raw_parallel = parallel_section.group(1)
+            parallel_list = re.findall(r"ST\d+", raw_parallel)
         else:
             parallel_list = []
 
