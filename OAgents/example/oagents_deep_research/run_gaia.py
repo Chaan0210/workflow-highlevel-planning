@@ -157,6 +157,12 @@ def parse_args():
         default=True,
         help="If enabled, the search ToolCallingAgent creates a single plan on step 1 and never re-plans. Disable to inherit the manager's planning cadence.",
     )
+    parser.add_argument(
+        "--retry_errors",
+        action="store_true",
+        default=False,
+        help="Re-run tasks whose stored result has no prediction or an agent_error (instead of skipping them on resume).",
+    )
     # memory params
     parser.add_argument("--summary", action="store_true", default=False, help="Summarize the current step memory")
     parser.add_argument("--use_long_term_memory", action="store_true", default=False, help="Use long-term memory")
@@ -238,10 +244,13 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
     # Search Agent 생성
     auto_planning_enabled = getattr(args, "auto_planning", False)
 
+    # The search agent is the component that actually gathers evidence on GAIA, so it
+    # must stay IDENTICAL across all planning configurations: with
+    # --search_agent_plan_once (default) it always plans exactly once at step 1,
+    # regardless of the manager's --static_plan / --planning_interval treatment.
     search_agent_planning_interval = args.planning_interval
     search_agent_static_plan = args.static_plan
-    if args.search_agent_plan_once and not args.static_plan:
-        # Force the search agent to produce just the initial plan (planning_interval=None -> plan only at step 1)
+    if args.search_agent_plan_once:
         search_agent_planning_interval = None
         search_agent_static_plan = False
 
@@ -262,7 +271,9 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
         debug=debug,
         static_plan=search_agent_static_plan,
         dynamic_update_plan=args.dynamic_update_plan,
-        reflection=args.reflection,
+        # --reflection is a manager-level treatment (adaptive re-planning); it must
+        # not leak into the shared search agent.
+        reflection=False,
     )
     text_webbrowser_agent.prompt_templates["managed_agent"]["task"] += """You can navigate to .txt online files.
     If a non-html page is in another format, especially .pdf or a Youtube video, use tool 'inspect_file_as_text' to inspect it.
@@ -399,8 +410,9 @@ Here is the task:
         # Agent 실행
         final_result = agent.run(augmented_question)
 
-        # 메모리 요약
-        agent_memory = agent.write_memory_to_messages(summary_mode=True)
+        # 메모리 추출: summary_mode=False라야 [PLAN] 메시지가 보존되어
+        # 최종 답 포맷팅이 플래닝 처치를 지우지 않는다.
+        agent_memory = agent.write_memory_to_messages(summary_mode=False)
 
         # 중간 단계 추출 및 로깅
         intermediate_steps = extract_intermediate_steps(agent)
@@ -435,16 +447,23 @@ Here is the task:
         task_steps = [step for step in intermediate_steps if step.get("step_type") == "task"]
         logger.info(f"📋 Total Task Steps: {len(task_steps)}")
 
-        # 응답 재구성
-        final_result = prepare_response(augmented_question, agent_memory, reformulation_model=model)
-        output = str(final_result)
+        # 응답 재구성: 에이전트가 낸 답을 앵커로 GAIA 형식으로 포맷팅만 수행
+        # (전사로부터 답을 새로 유도하지 않음 — 처치 간 차이를 보존).
+        output = str(
+            prepare_response(
+                augmented_question, agent_memory, reformulation_model=model, agent_answer=final_result
+            )
+        )
 
         logger.info(f"✅ Final Answer: {output[:200]}..." if len(output) > 200 else f"✅ Final Answer: {output}")
 
         intermediate_steps_check = [str(step) for step in agent.memory.steps]
         parsing_error = True if any(["AgentParsingError" in step for step in intermediate_steps_check]) else False
 
-        iteration_limit_exceeded = True if "Agent stopped due to iteration limit or time limit." in output else False
+        iteration_limit_exceeded = (
+            "Agent stopped due to iteration limit or time limit." in output
+            or any("Reached max steps" in step for step in intermediate_steps_check)
+        )
         raised_exception = False
 
         logger.info(f"⏱️  Task {example['task_id']} completed successfully")
@@ -459,6 +478,12 @@ Here is the task:
         raised_exception = True
 
     end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if args.static_plan:
+        planning_mode = "react"
+    elif args.subtask:
+        planning_mode = f"{args.subtask_mode}{'_rp' if args.auto_planning else ''}"
+    else:
+        planning_mode = f"interval_{'auto' if args.auto_planning else args.planning_interval}"
     # 결과 저장 구조
     annotated_example = {
         "agent_name": model.model_id,
@@ -475,15 +500,36 @@ Here is the task:
         "task": example["task"],
         "task_id": example["task_id"],
         "search_agent_actions": agent.managed_agents["search_agent"].task_records,
+        "planning_mode": planning_mode,
+        "replan_count": getattr(agent, "replan_count", 0),
+        "plan_parse_failures": getattr(agent, "plan_parse_failures", 0),
+        "subtask_records": getattr(agent, "subtask_records", []),
     }
     append_answer(annotated_example, answers_file, jsonl_lock)
 
 
-def get_examples_to_answer(answers_file, eval_df, selected_tasks=None, level="all", debug=False) -> List[dict]:
+def get_examples_to_answer(
+    answers_file, eval_df, selected_tasks=None, level="all", debug=False, retry_errors=False
+) -> List[dict]:
     logger.info(f"Loading answers from {answers_file}...")
     try:
         if os.path.exists(answers_file):
             answer_df = pd.read_json(answers_file, lines=True)
+            # Append-mode resume can leave several rows per task; the latest row wins.
+            if "task_id" in answer_df.columns:
+                answer_df = answer_df.drop_duplicates(subset="task_id", keep="last")
+            if retry_errors and "task_id" in answer_df.columns:
+                prediction_col = answer_df["prediction"] if "prediction" in answer_df.columns else None
+                error_col = answer_df["agent_error"] if "agent_error" in answer_df.columns else None
+                keep_mask = pd.Series(True, index=answer_df.index)
+                if prediction_col is not None:
+                    keep_mask &= prediction_col.notna()
+                if error_col is not None:
+                    keep_mask &= error_col.isna()
+                skipped = int((~keep_mask).sum())
+                if skipped:
+                    logger.info(f"--retry_errors: re-running {skipped} previously errored task(s).")
+                answer_df = answer_df[keep_mask]
             done_questions = answer_df.get("task_id", []).tolist()
             logger.info(f"Found {len(done_questions)} previous results!")
         else:
@@ -535,7 +581,9 @@ def main():
 
     selected_tasks = process_selected_tasks_param(args.selected_tasks)
     level = args.level
-    tasks_to_run = get_examples_to_answer(answers_file, eval_df, selected_tasks, level, args.debug)
+    tasks_to_run = get_examples_to_answer(
+        answers_file, eval_df, selected_tasks, level, args.debug, retry_errors=args.retry_errors
+    )
 
     if args.debug or args.concurrency == 1:
         for example in tasks_to_run:

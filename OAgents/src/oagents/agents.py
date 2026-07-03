@@ -195,7 +195,7 @@ class MultiStepAgent:
         planning_interval (`int`, *optional*): Interval at which the agent will run a planning step.
         name (`str`, *optional*): Necessary for a managed agent only - the name by which this agent can be called.
         description (`str`, *optional*): Necessary for a managed agent only - the description of this agent.
-        static_plan (`bool`, *optional*): Whether to use static plan.
+        static_plan (`bool`, *optional*): When True the agent never creates a planning step (fully reactive baseline).
         dynamic_update_plan (`bool`, *optional*): Whether to use dynamic update plan.
         agent_kb (`bool`, *optional*): Whether to provide knowledge retrieval from agent kb.
         provide_run_summary (`bool`, *optional*): Whether to provide a run summary when called as a managed agent.
@@ -614,6 +614,17 @@ class MultiStepAgent:
                     "### MODE: DAG (Graph)\n"
                     "- Include ##DAG_LIST with all dependencies.\n"
                     "- Provide ##PARALLEL_LIST with nodes that have no prerequisites.\n"
+                )
+            completed_summary = (
+                self._completed_subtasks_summary() if hasattr(self, "_completed_subtasks_summary") else ""
+            )
+            if completed_summary:
+                mode_hint += (
+                    "\n### ALREADY COMPLETED SUBTASKS\n"
+                    "The results below were already obtained and will remain available as context. "
+                    "Do NOT re-plan work that succeeded — plan only the REMAINING work "
+                    "(retry a failed subtask differently if needed):\n"
+                    f"{completed_summary}\n"
                 )
             variables["mode_hint"] = mode_hint
         update_plan_pre_messages = {
@@ -1795,6 +1806,13 @@ class CodeAgent(MultiStepAgent):
             )
 
         self.subtask_mode = subtask_mode
+        # Persistent subtask-plan execution state: one subtask is executed per agent
+        # step, so the plan survives across steps and re-planning can update it.
+        self._subtask_state = None
+        self._plan_retry_budget = 1
+        self.subtask_records = []
+        self.plan_parse_failures = 0
+        self.replan_count = 0
 
         if use_e2b_executor and len(self.managed_agents) > 0:
             raise Exception(
@@ -1822,10 +1840,10 @@ class CodeAgent(MultiStepAgent):
           - planning_interval=None -> 1스텝(처음)만 플랜
           - planning_interval=k -> 매 k스텝마다 플랜 (k==1이면 매 스텝)
         """
-        if getattr(self, "auto_planning", False):
-            return self._should_auto_plan(step_number)
         if self.static_plan:
             return False
+        if getattr(self, "auto_planning", False):
+            return self._should_auto_plan(step_number)
         if self.planning_interval is None or self.planning_interval <= 0:
             return step_number == 1
         return (step_number % self.planning_interval) == 0
@@ -1837,6 +1855,11 @@ class CodeAgent(MultiStepAgent):
         return None
 
     def _should_auto_plan(self, step_number: int) -> bool:
+        """Adaptive re-planning triggers: initial step, a step-level error, a failed
+        subtask, or an explicit `should_replan` verdict from the step evaluator.
+        Deliberately no keyword scan over observations — web content routinely
+        contains words like "error"/"not found" and would force re-planning on
+        nearly every step."""
         if step_number == 1:
             return True
         last_action = self._get_last_action_step()
@@ -1844,28 +1867,10 @@ class CodeAgent(MultiStepAgent):
             return False
         if getattr(last_action, "error", None):
             return True
+        if getattr(last_action, "subtask_failed", False):
+            return True
         if getattr(last_action, "should_replan", False):
             return True
-        observation_text = (last_action.observations or "").lower()
-        failure_keywords = (
-            "failed",
-            "error",
-            "exception",
-            "traceback",
-            "not found",
-            "unable",
-            "missing",
-            "could not",
-        )
-        if any(keyword in observation_text for keyword in failure_keywords):
-            return True
-        if hasattr(last_action, "score"):
-            try:
-                score_value = float(last_action.score) if last_action.score is not None else None
-            except (TypeError, ValueError):
-                score_value = None
-            if score_value is not None and score_value < 0:
-                return True
         return False
 
     def embed_text(self, text: str) -> List[float]:
@@ -2030,252 +2035,291 @@ class CodeAgent(MultiStepAgent):
                     dag_parse_failed = True
         return parallel_list, subtask_dict, dag_edges, dag_list_present, dag_parse_failed
 
-    def _schedule_and_execute_subtasks(self, memory_step, plan_content, memory_messages, memory_steps):
+    @staticmethod
+    def _format_missing_env_hint(message: str) -> Optional[str]:
+        patterns = (
+            r"KeyError: ['\"]?([A-Z][A-Z0-9_]+)['\"]?",
+            r"['\"]([A-Z][A-Z0-9_]+)['\"]",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, message)
+            if not match:
+                continue
+            candidate = match.group(1)
+            if candidate.isupper():
+                return (
+                    f"Missing environment variable `{candidate}` detected during subtask execution. "
+                    "Populate it via your shell or `.env` file before rerunning."
+                )
+        return None
+
+    @staticmethod
+    def _clip_subtask_output(value, limit: int = 4000) -> str:
+        text = str(value)
+        return text if len(text) <= limit else text[:limit] + " ...[truncated]"
+
+    def _load_subtask_plan(self, plan_content: str, planning_step=None) -> bool:
+        """Parse a ##ST plan into persistent execution state (one subtask per agent step).
+
+        Returns False when the plan is unusable for the current mode. Results of
+        subtasks completed under a previous plan version stay available as read-only
+        context (ST ids are not stable across re-plans, so they are not merged into
+        the new plan's dependency structure).
+        """
         mode = getattr(self, "subtask_mode", "sections")
-        max_dag_replans = 1
-        dag_replans = 0
-        while True:
-            parallel_list, subtask_dict, dag_edges, dag_list_present, dag_parse_failed = self._parse_plan(plan_content)
-            if mode == "dag":
-                dag_invalid_reason = None
-                if not subtask_dict:
-                    dag_invalid_reason = "Missing subtask blocks (##STx)."
-                elif not dag_list_present:
-                    dag_invalid_reason = "Missing ##DAG_LIST."
-                elif dag_parse_failed:
-                    dag_invalid_reason = "Invalid ##DAG_LIST syntax."
-                else:
-                    unknown_edges = [
-                        (a, b) for (a, b) in dag_edges if a not in subtask_dict or b not in subtask_dict
-                    ]
-                    if unknown_edges:
-                        dag_invalid_reason = f"Unknown DAG nodes in edges: {unknown_edges}"
-                if dag_invalid_reason:
-                    if dag_replans >= max_dag_replans:
-                        raise AgentParsingError(
-                            f"DAG plan invalid for dag mode: {dag_invalid_reason}", self.logger
-                        )
-                    dag_replans += 1
-                    replanning_step = self.planning_step(
-                        self.task,
-                        is_first_step=False,
-                        step=memory_step.step_number,
-                    )
-                    if replanning_step is not None:
-                        memory_steps.append(replanning_step)
-                        self._sync_memory_steps(memory_steps)
-                        memory_messages = self.write_memory_to_messages(memory_steps=memory_steps)
-                        if getattr(replanning_step, "model_output_message_plan", None):
-                            plan_content = replanning_step.model_output_message_plan.content
-                        else:
-                            plan_content = replanning_step.plan
-                    continue
-            break
+        parallel_list, subtask_dict, dag_edges, dag_list_present, dag_parse_failed = self._parse_plan(plan_content)
+        if not subtask_dict:
+            return False
+        if mode == "dag":
+            if not dag_list_present or dag_parse_failed:
+                return False
+            if any(a not in subtask_dict or b not in subtask_dict for (a, b) in dag_edges):
+                return False
 
-        def _format_missing_env_hint(message: str) -> Optional[str]:
-            patterns = (
-                r"KeyError: ['\"]?([A-Z][A-Z0-9_]+)['\"]?",
-                r"['\"]([A-Z][A-Z0-9_]+)['\"]",
-            )
-            for pattern in patterns:
-                match = re.search(pattern, message)
-                if not match:
-                    continue
-                candidate = match.group(1)
-                if candidate.isupper():
-                    return (
-                        f"Missing environment variable `{candidate}` detected during subtask execution. "
-                        "Populate it via your shell or `.env` file before rerunning."
-                    )
-            return None
-
-        # 실행 순서 계산
-        order_batches = []  # list[list[STx]]
-        all_nodes = list(subtask_dict.keys())
-
-        # If no subtasks found, return empty results
-        if not all_nodes:
-            return False, []
+        prior_results = {}
+        prior_version = 0
+        if self._subtask_state:
+            prior_version = self._subtask_state["plan_version"]
+            prior_results = dict(self._subtask_state.get("prior_results", {}))
+            for st, output in self._subtask_state.get("completed", {}).items():
+                prior_results[f"plan{prior_version}:{st}"] = output
 
         if mode == "sections":
-            # 섹션: PARALLEL_LIST 순서로 1개씩 실행(없으면 ST 번호순)
-            seq = parallel_list if parallel_list else sorted(all_nodes, key=lambda s: int(s[2:]))
-            for st in seq:
-                order_batches.append([st])
+            # PARALLEL_LIST is an ordering hint that may be partial or contain unknown
+            # ids; every parsed subtask must still be scheduled exactly once.
+            order = [st for st in parallel_list if st in subtask_dict]
+            order += sorted((st for st in subtask_dict if st not in order), key=lambda s: int(s[2:]))
         else:
-            # DAG: Kahn's algorithm (레벨별 배치 실행)
-            from collections import defaultdict, deque
+            order = sorted(subtask_dict, key=lambda s: int(s[2:]))
 
-            indeg = {n: 0 for n in all_nodes}
-            adj = defaultdict(list)
-            for a, b in dag_edges:
-                if a in indeg and b in indeg:
-                    adj[a].append(b)
-                    indeg[b] += 1
-            q = deque([n for n, d in indeg.items() if d == 0])
+        self._subtask_state = {
+            "mode": mode,
+            "plan_version": prior_version + 1,
+            "plan_content": plan_content,
+            "facts": getattr(planning_step, "facts", "") if planning_step is not None else "",
+            "subtasks": subtask_dict,
+            "dag_edges": dag_edges,
+            "parallel_list": parallel_list,
+            "order": order,
+            "completed": {},
+            "failed": set(),
+            "exec_order": [],
+            "prior_results": prior_results,
+        }
+        return True
 
-            # PARALLEL_LIST가 있으면 우선순위 힌트로 사용
-            def st_priority(x):
-                return (parallel_list.index(x) if x in parallel_list else 1e9, int(x[2:]))
+    def _next_subtask(self) -> Optional[str]:
+        """Sections mode: next pending subtask in the fixed order. Dag mode: the
+        highest-priority pending subtask whose predecessors have all completed
+        (dependency-gated ready set); on a cycle, falls back to any pending node."""
+        state = self._subtask_state
+        if not state:
+            return None
+        pending = [st for st in state["subtasks"] if st not in state["completed"]]
+        if not pending:
+            return None
+        if state["mode"] == "dag" and state["dag_edges"]:
+            ready = [
+                st for st in pending if all(a in state["completed"] for (a, b) in state["dag_edges"] if b == st)
+            ]
+            pool = ready or pending
 
-            while q:
-                # 같은 레벨은 병렬 배치(안전상 순차로 실행하지만 컨텍스트는 각자 전달)
-                level = sorted(list(q), key=st_priority)
-                order_batches.append(level)
-                for _ in range(len(level)):
-                    n = q.popleft()
-                    for m in adj[n]:
-                        indeg[m] -= 1
-                        if indeg[m] == 0:
-                            q.append(m)
-            # 사이클 대비: 남은 indeg>0 노드 있으면 번호순으로 뒤에 붙임
-            leftovers = [n for n, d in indeg.items() if d > 0]
-            if leftovers:
-                for n in sorted(leftovers, key=lambda s: int(s[2:])):
-                    order_batches.append([n])
+            def priority(st):
+                in_parallel = state["parallel_list"].index(st) if st in state["parallel_list"] else 10**9
+                return (in_parallel, int(st[2:]))
 
-        # 실행: 이전 결과를 의존/이전 섹션 컨텍스트로 전달
-        sub_outputs = {}  # STx -> any
-        tool_call_list, msg_list, out_list, obs_list = [], [], [], []
-        subtask_entries: list[dict[str, Any]] = []
-        any_final = False
-        final_outputs = []
+            return sorted(pool, key=priority)[0]
+        for st in state["order"]:
+            if st in pending:
+                return st
+        return pending[0]
 
-        for batch in order_batches:
-            for st in batch:
-                title = subtask_dict[st]["title"]
-                steps = subtask_dict[st]["steps"]
-                # 컨텍스트 구성: 의존 모드면 선행노드 출력만, 섹션 모드면 이전 모든 섹션 출력 제공
-                if mode == "dag" and dag_edges:
-                    preds = [a for (a, b) in dag_edges if b == st and a in sub_outputs]
-                    ctx_pairs = [(p, sub_outputs[p]) for p in preds]
-                else:
-                    # 섹션: 이전 모든 완료 섹션
-                    ctx_pairs = list(sub_outputs.items())
-                ctx_text = ""
-                context_sources: list[str] = []
-                context_payload: list[str] = []
-                if ctx_pairs:
-                    context_sources = [p for p, _ in ctx_pairs]
+    def _subtask_context_pairs(self, st: str) -> List[tuple]:
+        """Hand-off context for a subtask: sections mode passes every completed
+        section's result in execution order; dag mode passes only the direct
+        predecessors' results. Pre-re-plan results are always included (they cannot
+        be mapped onto the new plan's edges)."""
+        state = self._subtask_state
+        pairs = list(state["prior_results"].items())
+        if state["mode"] == "dag" and state["dag_edges"]:
+            preds = [a for (a, b) in state["dag_edges"] if b == st and a in state["completed"]]
+            pairs += [(p, state["completed"][p]) for p in preds]
+        else:
+            pairs += [(x, state["completed"][x]) for x in state["exec_order"] if x in state["completed"]]
+        return pairs
 
-                    # 너무 길어지는 것 방지: 문자열로만 가볍게 전달
-                    def clip(v):
-                        s = str(v)
-                        return s if len(s) < 1200 else (s[:1200] + " ...")
+    def _completed_subtasks_summary(self, limit_each: int = 800, limit_entries: int = 12) -> str:
+        if not self.subtask_records:
+            return ""
+        lines = []
+        for entry in self.subtask_records[-limit_entries:]:
+            output = self._clip_subtask_output(entry.get("effective_output", ""), limit_each)
+            lines.append(f"- {entry['subtask']} ({entry['title']}) [{entry['status']}]: {output}")
+        return "\n".join(lines)
 
-                    ctx_lines = [f"- {k}: {clip(v)}" for k, v in ctx_pairs]
-                    context_payload = ctx_lines
-                    ctx_text = "Context from previous subtasks:\n" + "\n".join(ctx_lines) + "\n"
+    def _record_subtask_result(
+        self,
+        memory_step,
+        st,
+        title,
+        steps,
+        ctx_pairs,
+        code,
+        observation,
+        output,
+        status,
+        error=None,
+        is_final_answer=False,
+    ):
+        state = self._subtask_state
+        effective_output = output if output not in (None, "", "None") else observation
+        state["completed"][st] = effective_output
+        state["exec_order"].append(st)
+        if status == "failed":
+            state["failed"].add(st)
+            memory_step.subtask_failed = True
+        entry = {
+            "subtask": st,
+            "title": title,
+            "steps": steps,
+            "plan_version": state["plan_version"],
+            "context_sources": [key for key, _ in ctx_pairs],
+            "tool_call_id": f"call_sub_p{state['plan_version']}_{st}",
+            "tool_name": "python_interpreter",
+            "code": code,
+            "observation": self._clip_subtask_output(observation, 8000),
+            "raw_output": output if isinstance(output, (str, int, float, bool)) or output is None else str(output),
+            "effective_output": self._clip_subtask_output(effective_output, 8000),
+            "output": self._clip_subtask_output(effective_output, 8000),
+            "is_final_answer": is_final_answer,
+            "status": status,
+        }
+        if error:
+            entry["error"] = str(error)
+        self.subtask_records.append(entry)
+        memory_step.action_output = [entry]
+        memory_step.observations = f"[Subtask {st}: {title}] ({status})\n{observation}"
+        if not getattr(memory_step, "model_output", None):
+            memory_step.model_output = f"Subtask {st} ({title}): {status}"
+        return effective_output
 
-                subtask_prompt = (
-                    "[SUB TASK AND steps]:\n"
-                    f"ANSWER THE SUBTASK:\n```\nsubtask: {title}\nsteps:\n{steps}\n```\n"
-                    + (ctx_text if ctx_text else "")
-                    + "Produce code to execute this subtask. If this subtask yields a final solution, call final_answer()."
-                )
-                message = Message(role=MessageRole.USER, content=[{"type": "text", "text": subtask_prompt}])
-                # 이전 메시지 + 서브태스크 메시지로 단일 실행
-                input_messages = memory_messages.copy()[:-1] + [message]
-                msg_list.append(input_messages)
-                try:
-                    additional_args = {"grammar": self.grammar} if self.grammar is not None else {}
-                    chat_message: ChatMessage = self.model(
-                        input_messages,
-                        stop_sequences=["<end_code>", "Observation:"],
-                        **additional_args,
-                    )
-                    model_output = (
-                        chat_message.content
-                        if not isinstance(chat_message.content, list)
-                        else "".join(map(str, chat_message.content))
-                    )
-                except Exception as e:
-                    raise AgentGenerationError(f"Error generating subtask code for {st}: {e}", self.logger)
+    def _execute_next_subtask(self, memory_step: ActionStep) -> Union[None, Any]:
+        """Execute exactly ONE pending subtask of the persistent plan state.
 
-                # 코드 파싱 및 실행
-                try:
-                    code_action = fix_final_answer_code(parse_code_blobs(model_output))
-                except Exception as e:
-                    raise AgentParsingError(f"Error parsing code for {st}: {e}", self.logger)
+        Errors are isolated to the subtask: a failed generation/parse/execution is
+        recorded as that subtask's result and the run moves on (in auto-planning
+        mode the failure additionally triggers a re-plan on the next step)."""
+        state = self._subtask_state
+        st = self._next_subtask()
+        info = state["subtasks"][st]
+        title, steps = info["title"], info["steps"]
+        ctx_pairs = self._subtask_context_pairs(st)
 
-                tool_call_list.append(ToolCall(name="python_interpreter", arguments=code_action, id=f"call_sub_{st}"))
-                exec_error: Optional[AgentExecutionError] = None
-                env_hint: Optional[str] = None
-                failure_notice: Optional[str] = None
-                try:
-                    observation, output, memory_step, is_final_answer, exec_console = self.execute_code(
-                        memory_step, code_action
-                    )
-                except AgentExecutionError as e:
-                    exec_error = e
-                    is_final_answer = False
-                    output = None
-                    error_message = str(e)
-                    env_hint = _format_missing_env_hint(error_message)
-                    failure_notice = f"Subtask {st} failed during execution: {error_message}"
-                    if env_hint:
-                        failure_notice = f"{failure_notice}\n{env_hint}"
-                    observation = failure_notice
-                    self.logger.log(
-                        f"[bold red]Subtask {st} failed; continuing with remaining subtasks.[/bold red]",
-                        level=LogLevel.ERROR,
-                    )
-                    if env_hint:
-                        self.logger.log(env_hint, level=LogLevel.ERROR)
+        ctx_lines = []
+        for key, value in ctx_pairs:
+            source_title = state["subtasks"].get(key, {}).get("title", "")
+            label = f"{key} ({source_title})" if source_title else key
+            ctx_lines.append(f"- {label}: {self._clip_subtask_output(value)}")
 
-                effective_output = output if output not in (None, "", "None") else observation
-                if failure_notice:
-                    effective_output = failure_notice
+        prompt = (
+            "You are executing ONE subtask of the plan below.\n\n"
+            f"[OVERALL PLAN]\n{state['plan_content']}\n\n"
+            + (f"[KNOWN FACTS]\n{state['facts']}\n\n" if state.get("facts") else "")
+            + ("[RESULTS FROM COMPLETED SUBTASKS]\n" + "\n".join(ctx_lines) + "\n\n" if ctx_lines else "")
+            + "[CURRENT SUBTASK]\n"
+            + f"subtask: {st}: {title}\nsteps:\n{steps}\n\n"
+            + "Write python code that executes ONLY this subtask, in the usual Thought/Code format. "
+            + "You may call the available tools and team members as python functions. "
+            + "If this subtask yields the final answer to the overall task, call final_answer(...). "
+            + "Otherwise end your code by print(...)-ing the key findings of this subtask so they can be "
+            + "handed to later subtasks."
+        )
+        input_messages = [
+            Message(role=MessageRole.SYSTEM, content=[{"type": "text", "text": self.system_prompt}]),
+            Message(role=MessageRole.USER, content=[{"type": "text", "text": f"New task:\n{self.task}"}]),
+            Message(role=MessageRole.USER, content=[{"type": "text", "text": prompt}]),
+        ]
+        memory_step.model_input_messages = input_messages.copy()
+        self.logger.log(
+            f"[bold]Executing subtask {st} ({title}) — plan v{state['plan_version']}, mode={state['mode']}[/bold]",
+            level=LogLevel.INFO,
+        )
 
-                sub_outputs[st] = effective_output
-                obs_list.append(observation)
-                out_list.append(output)
-                final_outputs.append(output)
-                entry = {
-                    "subtask": st,
-                    "title": title,
-                    "steps": steps,
-                    "context": ctx_text.strip(),
-                    "context_sources": context_sources,
-                    "context_payload": context_payload,
-                    "tool_call_id": f"call_sub_{st}",
-                    "tool_name": "python_interpreter",
-                    "code": code_action,
-                    "observation": observation,
-                    "raw_output": output,
-                    "effective_output": effective_output,
-                    "output": effective_output,
-                    "is_final_answer": is_final_answer,
-                }
-                if exec_error:
-                    entry["error"] = str(exec_error)
-                    entry["status"] = "failed"
-                else:
-                    entry["status"] = "succeeded"
-                subtask_entries.append(entry)
+        try:
+            additional_args = {"grammar": self.grammar} if self.grammar is not None else {}
+            chat_message: ChatMessage = self.model(
+                input_messages,
+                stop_sequences=["<end_code>", "Observation:"],
+                **additional_args,
+            )
+            model_output = (
+                chat_message.content
+                if not isinstance(chat_message.content, list)
+                else "".join(map(str, chat_message.content))
+            )
+            memory_step.model_output_message = chat_message
+            memory_step.model_output = model_output
+            code_action = fix_final_answer_code(parse_code_blobs(model_output))
+        except Exception as e:
+            failure_notice = f"Subtask {st} failed before execution: {e}"
+            self.logger.log(f"[bold red]{failure_notice}[/bold red]", level=LogLevel.ERROR)
+            self._record_subtask_result(
+                memory_step,
+                st,
+                title,
+                steps,
+                ctx_pairs,
+                code=None,
+                observation=failure_notice,
+                output=None,
+                status="failed",
+                error=str(e),
+            )
+            return None
 
-                if exec_error:
-                    continue
+        memory_step.tool_calls = [
+            ToolCall(name="python_interpreter", arguments=code_action, id=f"call_sub_p{state['plan_version']}_{st}")
+        ]
+        try:
+            observation, output, memory_step, is_final_answer, _ = self.execute_code(memory_step, code_action)
+        except AgentExecutionError as e:
+            error_message = str(e)
+            failure_notice = f"Subtask {st} failed during execution: {error_message}"
+            env_hint = self._format_missing_env_hint(error_message)
+            if env_hint:
+                failure_notice = f"{failure_notice}\n{env_hint}"
+            self.logger.log(
+                f"[bold red]Subtask {st} failed; continuing with remaining subtasks.[/bold red]",
+                level=LogLevel.ERROR,
+            )
+            self._record_subtask_result(
+                memory_step,
+                st,
+                title,
+                steps,
+                ctx_pairs,
+                code=code_action,
+                observation=failure_notice,
+                output=None,
+                status="failed",
+                error=error_message,
+            )
+            return None
 
-                if is_final_answer:
-                    any_final = True
-                    break
-            if any_final:
-                break
-
-        # 메모리 스텝에 기록
-        memory_step.model_input_messages = f"subtask_input_messages: {msg_list}"
-        memory_step.model_output_message = None
-        summary_lines = []
-        for entry in subtask_entries:
-            obs_preview = truncate_content(entry.get("observation") or entry.get("effective_output") or "")
-            summary_lines.append(f"{entry['subtask']} ({entry['title']}): {obs_preview}")
-        memory_step.model_output = "\n".join(summary_lines) if summary_lines else "No subtask outputs recorded."
-        memory_step.tool_calls = tool_call_list
-        obs_text = "\n\n".join(obs for obs in obs_list if obs)
-        memory_step.observations = obs_text if obs_text else "No observations recorded for subtasks."
-        memory_step.action_output = subtask_entries
-        return any_final, final_outputs
+        observation += "\nLast output from code snippet:\n" + truncate_content(str(output))
+        self._record_subtask_result(
+            memory_step,
+            st,
+            title,
+            steps,
+            ctx_pairs,
+            code=code_action,
+            observation=observation,
+            output=output,
+            status="succeeded",
+            is_final_answer=is_final_answer,
+        )
+        return output if is_final_answer else None
 
     def _retrieve_key_memory(self, memory_messages: List[Message]):
         if not self.retrieve_key_memory or len(memory_messages) <= 4:
@@ -2352,33 +2396,38 @@ class CodeAgent(MultiStepAgent):
                 plan_content = current_step.model_output_message_plan.content
             elif hasattr(current_step, "plan") and current_step.plan:
                 plan_content = current_step.plan
-        # current_message = memory_messages[-1]['content'][0]['text'] if memory_messages else ""
 
-        # plan_list = []
-        # message_list = []
+        # A fresh planning step (initial plan or re-plan) replaces the persistent
+        # subtask execution state; results completed so far carry over as context.
+        # In subtask mode a plan without valid ##ST blocks counts as a parse failure.
+        if self.subtask and plan_content:
+            if not self._load_subtask_plan(plan_content, planning_step=current_step):
+                self.plan_parse_failures += 1
+                replanned = False
+                if memory_steps is not None and self._plan_retry_budget > 0:
+                    self._plan_retry_budget -= 1
+                    replanning_step = self.planning_step(
+                        self.task, is_first_step=False, step=memory_step.step_number
+                    )
+                    if replanning_step is not None:
+                        memory_steps.append(replanning_step)
+                        self._sync_memory_steps(memory_steps)
+                        if getattr(replanning_step, "model_output_message_plan", None):
+                            new_plan = replanning_step.model_output_message_plan.content
+                        else:
+                            new_plan = replanning_step.plan
+                        replanned = self._load_subtask_plan(new_plan, planning_step=replanning_step)
+                        if not replanned:
+                            self.plan_parse_failures += 1
+                if not replanned:
+                    self.logger.log(
+                        f"[bold red]Subtask plan invalid for mode '{self.subtask_mode}'; "
+                        "falling back to plain ReAct steps.[/bold red]",
+                        level=LogLevel.ERROR,
+                    )
 
-        # if current_message.startswith("[PLAN]") and current_step and isinstance(current_step, PlanningStep):
-        #     if hasattr(current_step, "model_output_message_plan") and current_step.model_output_message_plan:
-        #         plan_content = current_step.model_output_message_plan.content
-        #         any_final, final_outputs = self._schedule_and_execute_subtasks(
-        #             memory_step, plan_content, memory_messages, memory_steps
-        #         )
-        #         return (final_outputs[-1] if any_final and final_outputs else None)
-        #     else:
-        #         # No plan content available, fall through to normal execution
-        #         pass
-        has_sections = False
-        if plan_content:
-            has_sections = (
-                bool(re.search(r"##ST\d+", plan_content))
-                or ("##PARALLEL_LIST" in plan_content)
-                or ("##DAG_LIST" in plan_content)
-            )
-        if current_step and isinstance(current_step, PlanningStep) and has_sections:
-            any_final, final_outputs = self._schedule_and_execute_subtasks(
-                memory_step, plan_content, memory_messages, memory_steps
-            )
-            return final_outputs[-1] if any_final and final_outputs else None
+        if self.subtask and self._subtask_state and self._next_subtask() is not None:
+            return self._execute_next_subtask(memory_step)
 
         else:
             memory_messages = (
@@ -2386,6 +2435,24 @@ class CodeAgent(MultiStepAgent):
             )
 
             self.input_messages = memory_messages.copy()
+
+            if self.subtask and self._subtask_state and self._next_subtask() is None:
+                self.input_messages.append(
+                    Message(
+                        role=MessageRole.USER,
+                        content=[
+                            {
+                                "type": "text",
+                                "text": (
+                                    "All planned subtasks have been executed; their results are in the "
+                                    "conversation above. Either produce the final answer now with "
+                                    "final_answer(...), or run the additional verification steps needed "
+                                    "to close remaining gaps."
+                                ),
+                            }
+                        ],
+                    )
+                )
 
             if additional_prompt and self.reflection:
                 self.input_messages.append(
@@ -2578,12 +2645,15 @@ class CodeAgent(MultiStepAgent):
             evaluate_thought = getattr(last_action, "evaluate_thought", "") if last_action else ""
             planning_step = self.reflect_planing(task, answer_message, evaluate_thought)
             if planning_step is not None:
+                self.replan_count += 1
                 self.logger.log_rule(f"Step {step_number}", level=LogLevel.INFO)
             return planning_step
         planning_step = self.planning_step(
             task, is_first_step=(step_number == 1), step=step_number, additional_knowledge=additional_knowledge
         )
         if planning_step is not None:
+            if step_number > 1:
+                self.replan_count += 1
             self.logger.log_rule(f"Step {step_number}", level=LogLevel.INFO)
         return planning_step
 
@@ -2844,6 +2914,7 @@ class CodeAgent(MultiStepAgent):
     def _run_baseline_strategy(self, task, images, additional_knowledge):
         memory_steps = self.memory.steps.copy()
         task_success, reflection = False, ""
+        final_answer = None
         evaluate = True if self.reflection else False
         while not task_success and self.step_number <= self.max_steps:
             current_memory_messages = self.write_memory_to_messages(memory_steps=memory_steps)
@@ -2879,7 +2950,11 @@ class CodeAgent(MultiStepAgent):
 
             self._record_action(memory_steps[-1], self.step_number, answer_message)
             self.step_number += 1
-        final_answer = prepare_response(task, current_memory_messages, self.model)
+        if not task_success:
+            # Only when the loop exhausted without an explicit final_answer do we
+            # derive one from the transcript; a found answer is returned as-is so the
+            # scored prediction reflects the agent's own conclusion.
+            final_answer = prepare_response(task, current_memory_messages, self.model)
         yield from self._finalize_with_max_steps_check(task, images, memory_steps)
         yield handle_agent_output_types(final_answer)
 

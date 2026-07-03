@@ -29,7 +29,20 @@ load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 KEY = os.getenv("OPENAI_API_KEY")
 URL = os.getenv("OPENAI_BASE_URL")
+# Step-evaluation judge model; override with VERIFY_MODEL to align it with the
+# experiment model instead of the default.
 MODEL = "gpt-4.1"
+
+
+def _judge_model() -> str:
+    return os.getenv("VERIFY_MODEL") or MODEL
+
+
+def _judge_request_kwargs(model: str) -> dict:
+    # Reasoning models reject `temperature` and require `max_completion_tokens`.
+    if any(tag in model for tag in ("gpt-5", "o1", "o3", "o4")):
+        return {"max_completion_tokens": 2048}
+    return {"max_tokens": 2048, "temperature": 0.0}
 
 client = None
 async_client = None
@@ -78,13 +91,15 @@ def parse_first_valid_json(text: str) -> dict:
 
 async def async_evaluate_answer(text: str, system_prompt: str, mode: str = "PRM") -> Any:
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
+    model = _judge_model()
 
     try:
+        if async_client is None:
+            raise RuntimeError("OPENAI_API_KEY is not set; step-evaluation judge is unavailable.")
         response = await async_client.chat.completions.create(
-            model=MODEL,
+            model=model,
             messages=messages,
-            max_tokens=2048,
-            temperature=0.0,
+            **_judge_request_kwargs(model),
         )
         content = response.choices[0].message.content
 
@@ -110,13 +125,15 @@ async def async_evaluate_answer(text: str, system_prompt: str, mode: str = "PRM"
 
 def evaluate_answer(text: str, system_prompt: str, mode: str = "PRM") -> Any:
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
+    model = _judge_model()
 
     try:
+        if client is None:
+            raise RuntimeError("OPENAI_API_KEY is not set; step-evaluation judge is unavailable.")
         response = client.chat.completions.create(
-            model=MODEL,
+            model=model,
             messages=messages,
-            max_tokens=2048,
-            temperature=0.0,
+            **_judge_request_kwargs(model),
         )
         content = response.choices[0].message.content
 
@@ -134,5 +151,6 @@ def evaluate_answer(text: str, system_prompt: str, mode: str = "PRM") -> Any:
             return content
 
     except Exception as e:
-        print(f"Error processing item: {e}")
+        # A silent no-op judge would invisibly disable adaptive re-planning, so shout.
+        print(f"[verify_function] evaluate_answer failed (model={model}, mode={mode}): {e}")
         return None

@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import textwrap
 from collections import Counter
+from itertools import combinations
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -48,7 +50,34 @@ def load_jsonl(path: Path) -> List[dict]:
             if not line:
                 continue
             records.append(json.loads(line))
-    return records
+    # Append-mode resume can write several rows per task; keep the latest attempt.
+    deduped: Dict[Any, dict] = {}
+    for index, record in enumerate(records):
+        deduped[record.get("task_id", f"__row_{index}")] = record
+    if len(deduped) != len(records):
+        print(f"  (dropped {len(records) - len(deduped)} duplicate task_id rows, keeping the latest)")
+    return list(deduped.values())
+
+
+def wilson_ci(successes: int, total: int, z: float = 1.96) -> Tuple[float, float]:
+    """95% Wilson score interval for a binomial proportion."""
+    if total == 0:
+        return (0.0, 0.0)
+    p = successes / total
+    denom = 1 + z * z / total
+    center = (p + z * z / (2 * total)) / denom
+    half = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total)) / denom
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
+def mcnemar_exact_p(b: int, c: int) -> float:
+    """Two-sided exact McNemar test on discordant pair counts (binomial, p=0.5)."""
+    n = b + c
+    if n == 0:
+        return 1.0
+    k = min(b, c)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) * (0.5**n)
+    return min(1.0, 2.0 * tail)
 
 
 def parse_timestamp(timestamp: Any) -> datetime | None:
@@ -394,12 +423,15 @@ def print_run_summary(summary: dict, df: pd.DataFrame, top_tools: int, incorrect
 def build_summary_table(summaries: List[dict]) -> None:
     rows = []
     for summary in summaries:
+        correct = int(round(summary["accuracy"] * summary["num_tasks"]))
+        low, high = wilson_ci(correct, summary["num_tasks"])
         rows.append(
             {
                 "Run": summary["run_label"],
                 "Tasks": summary["num_tasks"],
                 "Levels": ",".join(str(lvl) for lvl in summary["levels"]) or "-",
                 "Accuracy (%)": round(summary["accuracy"] * 100, 2),
+                "95% CI (%)": f"[{low * 100:.1f}, {high * 100:.1f}]",
                 "Avg Steps": round(summary["avg_action_steps"], 2),
                 "Avg Replans": round(summary["avg_replans"], 2),
                 "Avg Tool Calls": round(summary["avg_tool_calls"], 2),
@@ -408,6 +440,46 @@ def build_summary_table(summaries: List[dict]) -> None:
         )
     print("Overall summary:")
     print(pd.DataFrame(rows).to_string(index=False))
+    print()
+
+
+def print_significance_tests(all_df: pd.DataFrame, run_labels: List[str]) -> None:
+    """Paired McNemar exact test for every pair of runs, on their shared tasks."""
+    if len(run_labels) < 2 or all_df.empty:
+        return
+    pivot = all_df.pivot_table(index="task_id", columns="run_label", values="correct", aggfunc="first")
+    rows = []
+    for label_a, label_b in combinations([lbl for lbl in run_labels if lbl in pivot.columns], 2):
+        paired = pivot[[label_a, label_b]].dropna()
+        if paired.empty:
+            continue
+        a = paired[label_a].astype(bool)
+        b = paired[label_b].astype(bool)
+        b_only_a = int((a & ~b).sum())
+        b_only_b = int((~a & b).sum())
+        p_value = mcnemar_exact_p(b_only_a, b_only_b)
+        rows.append(
+            {
+                "Run A": label_a,
+                "Run B": label_b,
+                "Shared": len(paired),
+                "A only correct": b_only_a,
+                "B only correct": b_only_b,
+                "Acc A (%)": round(a.mean() * 100, 1),
+                "Acc B (%)": round(b.mean() * 100, 1),
+                "McNemar p": round(p_value, 4),
+                "Significant(α=.05)": "yes" if p_value < 0.05 else "no",
+            }
+        )
+    if not rows:
+        return
+    print("=" * 100)
+    print("Paired significance (exact McNemar on shared tasks):")
+    print(pd.DataFrame(rows).to_string(index=False))
+    print(
+        "Note: with ~30 shared tasks only large accuracy gaps reach significance; "
+        "treat non-significant differences as noise."
+    )
     print()
 
 
@@ -527,6 +599,7 @@ def main() -> None:
         print_run_summary(summary, df, args.top_tools, args.show_incorrect)
 
     combined_df = pd.concat(per_run_dfs, ignore_index=True)
+    print_significance_tests(combined_df, [label for label, _ in run_specs])
     print_comparison(combined_df, [label for label, _ in run_specs], args.show_comparison)
 
     if args.export_csv:

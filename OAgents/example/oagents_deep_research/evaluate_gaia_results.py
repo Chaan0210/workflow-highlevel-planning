@@ -15,6 +15,11 @@ def evaluate_results(jsonl_file):
     try:
         df = pd.read_json(jsonl_file, lines=True)
         print(f"Loaded {len(df)} results")
+        if "task_id" in df.columns:
+            before = len(df)
+            df = df.drop_duplicates(subset="task_id", keep="last")
+            if len(df) != before:
+                print(f"Dropped {before - len(df)} duplicate task_id row(s) (kept the latest attempt).")
     except Exception as e:
         print(f"Error loading file: {e}")
         return

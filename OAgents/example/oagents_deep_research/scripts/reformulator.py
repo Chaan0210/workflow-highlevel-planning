@@ -3,7 +3,7 @@ import copy
 from oagents.models import MessageRole, Model
 
 
-def prepare_response(original_task: str, inner_messages, reformulation_model: Model) -> str:
+def prepare_response(original_task: str, inner_messages, reformulation_model: Model, agent_answer=None) -> str:
     messages = [
         {
             "role": MessageRole.SYSTEM,
@@ -27,6 +27,26 @@ def prepare_response(original_task: str, inner_messages, reformulation_model: Mo
             messages.append(message)
     except Exception:
         messages += [{"role": MessageRole.ASSISTANT, "content": str(inner_messages)}]
+
+    # The agent's own conclusion anchors the reformulation: the reformulator's job
+    # is to FORMAT that answer, not to re-answer the task from the transcript.
+    if agent_answer is not None and str(agent_answer).strip():
+        messages.append(
+            {
+                "role": MessageRole.USER,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "The team concluded with this proposed FINAL ANSWER:\n"
+                            f"{str(agent_answer)}\n"
+                            "Unless the transcript above clearly contradicts it, reformat THIS answer "
+                            "according to the formatting rules that follow instead of deriving a new one."
+                        ),
+                    }
+                ],
+            }
+        )
 
     # ask for the final answer
     messages.append(
