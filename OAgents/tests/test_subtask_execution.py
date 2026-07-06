@@ -42,6 +42,7 @@ class ScriptedModel:
         self.fact_calls = 0
         self.react_calls = 0
         self.plan_prompts = []
+        self.react_prompts = []
         self.subtask_prompts = {}
 
     def __call__(self, messages, stop_sequences=None, **kwargs):
@@ -62,13 +63,16 @@ class ScriptedModel:
                 code = codes.pop(0) if len(codes) > 1 else codes[0]
                 return ChatMessage(role="assistant", content=code)
             self.react_calls += 1
+            self.react_prompts.append(text)
             return ChatMessage(role="assistant", content="```python\nfinal_answer('react-fallback')\n```")
 
         self.fact_calls += 1
         return ChatMessage(role="assistant", content="facts")
 
 
-def make_agent(model, mode, auto_planning=False, reflection=False, max_steps=8):
+def make_agent(
+    model, mode, auto_planning=False, reflection=False, max_steps=8, parallel_subtasks=False, plan_as_prompt=False
+):
     return CodeAgent(
         tools=[],
         model=model,
@@ -78,6 +82,8 @@ def make_agent(model, mode, auto_planning=False, reflection=False, max_steps=8):
         planning_interval=0,
         auto_planning=auto_planning,
         reflection=reflection,
+        parallel_subtasks=parallel_subtasks,
+        plan_as_prompt=plan_as_prompt,
         verbosity_level=LogLevel.ERROR,
     )
 
@@ -232,6 +238,70 @@ ST2
     assert str(result) == "all-done"
     # ST2 is ordered first (hint), but ST1/ST3 must still run instead of being dropped.
     assert [entry["subtask"] for entry in agent.subtask_records] == ["ST2", "ST1", "ST3"]
+
+
+def test_dag_parallel_batch_executes_ready_set_concurrently_in_one_step():
+    import threading
+
+    # Both ready branches must be in flight at the same time to pass this barrier;
+    # sequential execution would deadlock (broken barrier) and fail the test.
+    barrier = threading.Barrier(2, timeout=10)
+
+    class BarrierModel(ScriptedModel):
+        def __call__(self, messages, stop_sequences=None, **kwargs):
+            text = str(messages)
+            if stop_sequences == ["<end_code>", "Observation:"] and (
+                "subtask: ST1" in text.split("[CURRENT SUBTASK]")[-1]
+                or "subtask: ST2" in text.split("[CURRENT SUBTASK]")[-1]
+            ):
+                barrier.wait()
+            return super().__call__(messages, stop_sequences=stop_sequences, **kwargs)
+
+    model = BarrierModel(
+        plans=[DAG_PLAN],
+        subtask_codes={
+            "ST1": ["```python\nprint('RESULT_ST1 part-one')\n```"],
+            "ST2": ["```python\nprint('RESULT_ST2 part-two')\n```"],
+            "ST3": ["```python\nfinal_answer('merged')\n```"],
+        },
+    )
+    agent = make_agent(model, "dag", parallel_subtasks=True)
+    result = agent.run("merge two branches in parallel")
+
+    assert str(result) == "merged"
+    # ST1+ST2 form one parallel batch; results merge deterministically in priority order.
+    assert [entry["subtask"] for entry in agent.subtask_records] == ["ST1", "ST2", "ST3"]
+    assert agent.subtask_records[0]["parallel_batch"] == ["ST1", "ST2"]
+    assert agent.subtask_records[1]["parallel_batch"] == ["ST1", "ST2"]
+    assert agent.subtask_records[2]["parallel_batch"] == ["ST3"]
+
+    # The whole batch lives in ONE ActionStep (two entries), ST3 in another.
+    batch_steps = [
+        step
+        for step in agent.memory.steps
+        if isinstance(step, ActionStep) and isinstance(step.action_output, list) and step.action_output
+    ]
+    assert [len(step.action_output) for step in batch_steps] == [2, 1]
+
+    # Dependency-gated hand-off still holds in the parallel path.
+    assert "RESULT_ST1" not in model.subtask_prompts["ST2"][0]
+    assert "RESULT_ST1" in model.subtask_prompts["ST3"][0]
+    assert "RESULT_ST2" in model.subtask_prompts["ST3"][0]
+
+
+def test_plan_as_prompt_keeps_plain_react_execution():
+    model = ScriptedModel(plans=[SECTIONS_PLAN], subtask_codes={})
+    agent = make_agent(model, "sections", plan_as_prompt=True)
+    result = agent.run("plan as guidance only")
+
+    assert str(result) == "react-fallback"
+    # No subtask executor involvement whatsoever...
+    assert agent.subtask_records == []
+    assert agent._subtask_state is None
+    assert agent.plan_parse_failures == 0
+    # ...but the ReAct step DOES see the ##ST plan as [PLAN] guidance in memory.
+    assert model.react_calls >= 1
+    assert "##ST1" in model.react_prompts[0]
 
 
 def test_unparseable_plan_falls_back_loudly_to_react():

@@ -28,6 +28,7 @@ import tempfile
 import textwrap
 import time
 from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor
 from logging import getLogger
 from pathlib import Path
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, TypedDict, Union
@@ -1549,13 +1550,14 @@ class ToolCallingAgent(MultiStepAgent):
         Behavior:
           - static_plan=True  -> never plan
           - planning_interval=None -> plan only at step 1
-          - planning_interval=k -> plan every k steps (k==1 means every step)
+          - planning_interval=k -> plan at step 1 and then every k steps
+            (steps 1, k+1, 2k+1, ...; k==1 means every step)
         """
         if self.static_plan:
             return False
         if self.planning_interval is None or self.planning_interval <= 0:
             return step_number == 1
-        return (step_number % self.planning_interval) == 0
+        return ((step_number - 1) % self.planning_interval) == 0
 
     def _run(
         self, task: str, images: List[str] | None = None, additional_knowledge: Optional[str] = None
@@ -1768,6 +1770,9 @@ class CodeAgent(MultiStepAgent):
         retrieve_key_memory: bool = False,
         subtask_mode: str = "sections",  # 'sections'(Plan-then-Act) | 'dag'(Graph)
         auto_planning: bool = False,
+        parallel_subtasks: bool = True,
+        managed_agent_factory: Optional[Callable[[], List]] = None,
+        plan_as_prompt: bool = False,
         **kwargs,
     ):
         self.additional_authorized_imports = additional_authorized_imports if additional_authorized_imports else []
@@ -1807,12 +1812,21 @@ class CodeAgent(MultiStepAgent):
 
         self.subtask_mode = subtask_mode
         # Persistent subtask-plan execution state: one subtask is executed per agent
-        # step, so the plan survives across steps and re-planning can update it.
+        # step (dag mode: one READY BATCH per step, executed concurrently), so the
+        # plan survives across steps and re-planning can update it.
         self._subtask_state = None
         self._plan_retry_budget = 1
         self.subtask_records = []
         self.plan_parse_failures = 0
         self.replan_count = 0
+        self.parallel_subtasks = parallel_subtasks
+        # Parallel branches need their own managed-agent instances (agents keep
+        # per-run memory and are not thread-safe); without a factory, batches with
+        # managed agents fall back to sequential execution.
+        self.managed_agent_factory = managed_agent_factory
+        # Ablation arm: generate the ##ST plan but use it ONLY as prompt guidance —
+        # execution stays plain ReAct (plan-as-guidance vs plan-as-control-flow).
+        self.plan_as_prompt = plan_as_prompt
 
         if use_e2b_executor and len(self.managed_agents) > 0:
             raise Exception(
@@ -1838,7 +1852,7 @@ class CodeAgent(MultiStepAgent):
         ToolCallingAgent와 동일한 규칙:
           - static_plan=True  -> 플랜하지 않음
           - planning_interval=None -> 1스텝(처음)만 플랜
-          - planning_interval=k -> 매 k스텝마다 플랜 (k==1이면 매 스텝)
+          - planning_interval=k -> 1스텝 + 이후 매 k스텝마다 플랜 (1, k+1, 2k+1, ...)
         """
         if self.static_plan:
             return False
@@ -1846,7 +1860,7 @@ class CodeAgent(MultiStepAgent):
             return self._should_auto_plan(step_number)
         if self.planning_interval is None or self.planning_interval <= 0:
             return step_number == 1
-        return (step_number % self.planning_interval) == 0
+        return ((step_number - 1) % self.planning_interval) == 0
 
     def _get_last_action_step(self) -> Optional[ActionStep]:
         for step in reversed(self.memory.steps):
@@ -2170,6 +2184,7 @@ class CodeAgent(MultiStepAgent):
         status,
         error=None,
         is_final_answer=False,
+        parallel_batch=None,
     ):
         state = self._subtask_state
         effective_output = output if output not in (None, "", "None") else observation
@@ -2193,24 +2208,59 @@ class CodeAgent(MultiStepAgent):
             "output": self._clip_subtask_output(effective_output, 8000),
             "is_final_answer": is_final_answer,
             "status": status,
+            "parallel_batch": list(parallel_batch) if parallel_batch else [st],
         }
         if error:
             entry["error"] = str(error)
         self.subtask_records.append(entry)
-        memory_step.action_output = [entry]
-        memory_step.observations = f"[Subtask {st}: {title}] ({status})\n{observation}"
+
+        # A dag ready-batch records several subtasks into ONE ActionStep, so all
+        # step fields accumulate instead of overwriting.
+        existing_outputs = memory_step.action_output if isinstance(memory_step.action_output, list) else []
+        memory_step.action_output = existing_outputs + [entry]
+        observation_block = f"[Subtask {st}: {title}] ({status})\n{observation}"
+        memory_step.observations = (
+            f"{memory_step.observations}\n\n{observation_block}" if memory_step.observations else observation_block
+        )
+        if code is not None:
+            existing_calls = memory_step.tool_calls or []
+            memory_step.tool_calls = existing_calls + [
+                ToolCall(name="python_interpreter", arguments=code, id=entry["tool_call_id"])
+            ]
         if not getattr(memory_step, "model_output", None):
             memory_step.model_output = f"Subtask {st} ({title}): {status}"
         return effective_output
 
-    def _execute_next_subtask(self, memory_step: ActionStep) -> Union[None, Any]:
-        """Execute exactly ONE pending subtask of the persistent plan state.
-
-        Errors are isolated to the subtask: a failed generation/parse/execution is
-        recorded as that subtask's result and the run moves on (in auto-planning
-        mode the failure additionally triggers a re-plan on the next step)."""
+    def _next_subtask_batch(self) -> List[str]:
+        """The unit of work for the next agent step. Sections mode: one subtask.
+        Dag mode with parallel execution enabled: the full dependency-ready set,
+        executed concurrently within a single step."""
         state = self._subtask_state
-        st = self._next_subtask()
+        if not state:
+            return []
+        next_st = self._next_subtask()
+        if next_st is None:
+            return []
+        if state["mode"] != "dag" or not state["dag_edges"] or not self.parallel_subtasks:
+            return [next_st]
+        if self.managed_agents and self.managed_agent_factory is None:
+            # Shared managed agents are not thread-safe; run the batch sequentially.
+            return [next_st]
+        pending = [st for st in state["subtasks"] if st not in state["completed"]]
+        ready = [st for st in pending if all(a in state["completed"] for (a, b) in state["dag_edges"] if b == st)]
+        if not ready:
+            return [next_st]
+
+        def priority(st):
+            in_parallel = state["parallel_list"].index(st) if st in state["parallel_list"] else 10**9
+            return (in_parallel, int(st[2:]))
+
+        return sorted(ready, key=priority)
+
+    def _build_subtask_messages(self, st: str):
+        """Build the isolated executor prompt for one subtask. Returns
+        (input_messages, ctx_pairs)."""
+        state = self._subtask_state
         info = state["subtasks"][st]
         title, steps = info["title"], info["steps"]
         ctx_pairs = self._subtask_context_pairs(st)
@@ -2230,6 +2280,9 @@ class CodeAgent(MultiStepAgent):
             + f"subtask: {st}: {title}\nsteps:\n{steps}\n\n"
             + "Write python code that executes ONLY this subtask, in the usual Thought/Code format. "
             + "You may call the available tools and team members as python functions. "
+            + "Keep the code SHORT and SIMPLE: prefer a few plain statements over complex logic, "
+            + "delegate web research to team members instead of re-implementing it, and only import "
+            + "modules from the authorized list in your system prompt. "
             + "If this subtask yields the final answer to the overall task, call final_answer(...). "
             + "Otherwise end your code by print(...)-ing the key findings of this subtask so they can be "
             + "handed to later subtasks."
@@ -2239,6 +2292,20 @@ class CodeAgent(MultiStepAgent):
             Message(role=MessageRole.USER, content=[{"type": "text", "text": f"New task:\n{self.task}"}]),
             Message(role=MessageRole.USER, content=[{"type": "text", "text": prompt}]),
         ]
+        return input_messages, ctx_pairs
+
+    def _execute_next_subtask(self, memory_step: ActionStep, st: Optional[str] = None) -> Union[None, Any]:
+        """Execute exactly ONE pending subtask of the persistent plan state, using the
+        agent's shared python interpreter (sequential semantics).
+
+        Errors are isolated to the subtask: a failed generation/parse/execution is
+        recorded as that subtask's result and the run moves on (in auto-planning
+        mode the failure additionally triggers a re-plan on the next step)."""
+        state = self._subtask_state
+        st = st or self._next_subtask()
+        info = state["subtasks"][st]
+        title, steps = info["title"], info["steps"]
+        input_messages, ctx_pairs = self._build_subtask_messages(st)
         memory_step.model_input_messages = input_messages.copy()
         self.logger.log(
             f"[bold]Executing subtask {st} ({title}) — plan v{state['plan_version']}, mode={state['mode']}[/bold]",
@@ -2277,9 +2344,6 @@ class CodeAgent(MultiStepAgent):
             )
             return None
 
-        memory_step.tool_calls = [
-            ToolCall(name="python_interpreter", arguments=code_action, id=f"call_sub_p{state['plan_version']}_{st}")
-        ]
         try:
             observation, output, memory_step, is_final_answer, _ = self.execute_code(memory_step, code_action)
         except AgentExecutionError as e:
@@ -2320,6 +2384,114 @@ class CodeAgent(MultiStepAgent):
             is_final_answer=is_final_answer,
         )
         return output if is_final_answer else None
+
+    def _run_subtask_branch(self, st: str, input_messages) -> dict:
+        """Worker-thread body for one parallel dag branch: model call -> code parse ->
+        execution in an ISOLATED interpreter with branch-local managed agents.
+        Branches share no python state; hand-off happens only via recorded results."""
+        result = {
+            "st": st,
+            "status": "succeeded",
+            "model_output": None,
+            "code": None,
+            "observation": "",
+            "output": None,
+            "is_final_answer": False,
+            "error": None,
+            "clones": None,
+        }
+        try:
+            additional_args = {"grammar": self.grammar} if self.grammar is not None else {}
+            chat_message: ChatMessage = self.model(
+                input_messages,
+                stop_sequences=["<end_code>", "Observation:"],
+                **additional_args,
+            )
+            model_output = (
+                chat_message.content
+                if not isinstance(chat_message.content, list)
+                else "".join(map(str, chat_message.content))
+            )
+            result["model_output"] = model_output
+            result["code"] = fix_final_answer_code(parse_code_blobs(model_output))
+        except Exception as e:
+            result.update(status="failed", error=str(e), observation=f"Subtask {st} failed before execution: {e}")
+            return result
+
+        try:
+            branch_managed = {}
+            if self.managed_agent_factory is not None:
+                branch_managed = {agent.name: agent for agent in self.managed_agent_factory()}
+                result["clones"] = branch_managed
+            branch_tools = {**self.tools, **branch_managed}
+            branch_executor = LocalPythonInterpreter(
+                self.additional_authorized_imports,
+                branch_tools,
+                max_print_outputs_length=self.max_print_outputs_length,
+            )
+            output, logs, is_final_answer = branch_executor(result["code"], dict(self.state))
+            observation = "Execution logs:\n" + logs
+            observation += "\nLast output from code snippet:\n" + truncate_content(str(output))
+            result.update(output=output, observation=observation, is_final_answer=is_final_answer)
+        except Exception as e:
+            error_message = str(e)
+            failure_notice = f"Subtask {st} failed during execution: {error_message}"
+            env_hint = self._format_missing_env_hint(error_message)
+            if env_hint:
+                failure_notice = f"{failure_notice}\n{env_hint}"
+            result.update(status="failed", error=error_message, observation=failure_notice)
+        return result
+
+    def _execute_subtask_batch(self, memory_step: ActionStep, batch: List[str]) -> Union[None, Any]:
+        """Execute a dependency-ready set of dag subtasks CONCURRENTLY inside one
+        agent step. Hand-off context is frozen at batch start (all branches see the
+        same predecessors), results merge back in priority order for determinism."""
+        state = self._subtask_state
+        prompts = {st: self._build_subtask_messages(st) for st in batch}
+        memory_step.model_input_messages = f"parallel_subtask_batch: {batch}"
+        self.logger.log(
+            f"[bold]Executing parallel subtask batch {batch} — plan v{state['plan_version']}, mode={state['mode']}[/bold]",
+            level=LogLevel.INFO,
+        )
+
+        with ThreadPoolExecutor(max_workers=min(len(batch), 4)) as pool:
+            futures = {st: pool.submit(self._run_subtask_branch, st, prompts[st][0]) for st in batch}
+            results = {st: futures[st].result() for st in batch}
+
+        final_output = None
+        any_final = False
+        for st in batch:
+            branch = results[st]
+            clones = branch.pop("clones", None)
+            if clones:
+                for name, clone in clones.items():
+                    primary = self.managed_agents.get(name)
+                    if primary is not None and hasattr(clone, "task_records"):
+                        primary.task_records.update(getattr(clone, "task_records", {}))
+            if branch["status"] == "failed":
+                self.logger.log(
+                    f"[bold red]Subtask {st} failed; continuing with remaining subtasks.[/bold red]",
+                    level=LogLevel.ERROR,
+                )
+            info = state["subtasks"][st]
+            self._record_subtask_result(
+                memory_step,
+                st,
+                info["title"],
+                info["steps"],
+                prompts[st][1],
+                code=branch["code"],
+                observation=branch["observation"],
+                output=branch["output"],
+                status=branch["status"],
+                error=branch["error"],
+                is_final_answer=branch["is_final_answer"],
+                parallel_batch=batch,
+            )
+            if branch["is_final_answer"] and not any_final:
+                any_final = True
+                final_output = branch["output"]
+        return final_output if any_final else None
 
     def _retrieve_key_memory(self, memory_messages: List[Message]):
         if not self.retrieve_key_memory or len(memory_messages) <= 4:
@@ -2400,7 +2572,9 @@ class CodeAgent(MultiStepAgent):
         # A fresh planning step (initial plan or re-plan) replaces the persistent
         # subtask execution state; results completed so far carry over as context.
         # In subtask mode a plan without valid ##ST blocks counts as a parse failure.
-        if self.subtask and plan_content:
+        # plan_as_prompt keeps the plan purely as [PLAN] guidance in memory: no
+        # subtask state is built and execution stays plain ReAct.
+        if self.subtask and plan_content and not self.plan_as_prompt:
             if not self._load_subtask_plan(plan_content, planning_step=current_step):
                 self.plan_parse_failures += 1
                 replanned = False
@@ -2426,8 +2600,11 @@ class CodeAgent(MultiStepAgent):
                         level=LogLevel.ERROR,
                     )
 
-        if self.subtask and self._subtask_state and self._next_subtask() is not None:
-            return self._execute_next_subtask(memory_step)
+        subtask_batch = self._next_subtask_batch() if (self.subtask and self._subtask_state) else []
+        if subtask_batch:
+            if len(subtask_batch) > 1:
+                return self._execute_subtask_batch(memory_step, subtask_batch)
+            return self._execute_next_subtask(memory_step, subtask_batch[0])
 
         else:
             memory_messages = (

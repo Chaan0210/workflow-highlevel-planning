@@ -3,6 +3,9 @@ import string
 import warnings
 
 
+_NUMBER_TOKEN_PATTERN = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+
+
 def normalize_number_str(number_str: str) -> float:
     # we replace these common units and commas to allow
     # conversion to float
@@ -11,6 +14,13 @@ def normalize_number_str(number_str: str) -> float:
     try:
         return float(number_str)
     except ValueError:
+        # A numerically correct answer must not fail on a trailing unit or phrasing
+        # (e.g. "0.1777 m^3", "approximately 42"): fall back to the first numeric
+        # token, mirroring the lenient normalization used by GAIA agent harnesses.
+        tokens = _NUMBER_TOKEN_PATTERN.findall(number_str)
+        if tokens:
+            print(f"String '{number_str}' normalized via numeric-token extraction -> {tokens[0]}")
+            return float(tokens[0])
         print(f"String {number_str} cannot be normalized to number str.")
         return float("inf")
 

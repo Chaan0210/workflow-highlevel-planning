@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -56,6 +57,8 @@ from oagents.memory import ActionStep, PlanningStep, TaskStep
 
 
 # 허용된 Python 라이브러리(CodeAgent가 코드 실행 시 사용할 수 있는 안전한 라이브러리 목록)
+# 계획형 구성은 서브태스크마다 코드를 생성하므로 미허용-임포트 실패가 잦았다.
+# GAIA 파일 처리(xlsx/docx)와 텍스트·데이터 가공에 필요한 표준 모듈을 폭넓게 허용한다.
 AUTHORIZED_IMPORTS = [
     "requests",
     "zipfile",
@@ -86,6 +89,28 @@ AUTHORIZED_IMPORTS = [
     "sys",
     "shutil",
     "pprint",
+    # stdlib text/data wrangling
+    "string",
+    "functools",
+    "operator",
+    "heapq",
+    "bisect",
+    "textwrap",
+    "difflib",
+    "decimal",
+    "calendar",
+    "hashlib",
+    "base64",
+    "binascii",
+    "struct",
+    "glob",
+    "pathlib",
+    "urllib",
+    "gzip",
+    "tarfile",
+    # GAIA attachment readers
+    "openpyxl",
+    "docx",
 ]
 
 
@@ -150,6 +175,12 @@ def parse_args():
         default=None,
         help='Subtask execution mode: "sections" = Plan-then-Act(순차), "dag" = Graph(DAG 의존성)',
     )
+    parser.add_argument(
+        "--plan_as_prompt",
+        action="store_true",
+        default=False,
+        help="Ablation arm: generate the subtask plan but use it only as prompt guidance (execution stays plain ReAct).",
+    )
     parser.add_argument("--dynamic_update_plan", action="store_true", default=False, help="Use dynamic update plan")
     parser.add_argument(
         "--search_agent_plan_once",
@@ -162,6 +193,12 @@ def parse_args():
         action="store_true",
         default=False,
         help="Re-run tasks whose stored result has no prediction or an agent_error (instead of skipping them on resume).",
+    )
+    parser.add_argument(
+        "--no_parallel_subtasks",
+        action="store_true",
+        default=False,
+        help="Disable concurrent execution of dependency-ready dag subtask batches (they then run sequentially).",
     )
     # memory params
     parser.add_argument("--summary", action="store_true", default=False, help="Summarize the current step memory")
@@ -185,6 +222,8 @@ def parse_args():
 
     if subtask_mode_specified and not args.subtask:
         parser.error("Error: --subtask must be enabled when using --subtask_mode.")
+    if args.plan_as_prompt and not args.subtask:
+        parser.error("Error: --plan_as_prompt requires --subtask (a subtask plan must be generated).")
 
     return args
 
@@ -254,30 +293,37 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
         search_agent_planning_interval = None
         search_agent_static_plan = False
 
-    text_webbrowser_agent = ToolCallingAgent(
-        model=model_search,
-        tools=WEB_TOOLS,
-        max_steps=args.max_steps,
-        verbosity_level=2,
-        planning_interval=search_agent_planning_interval,
-        name="search_agent",
-        description="""A team member that will search the internet to answer your question.
+    def make_search_agent() -> ToolCallingAgent:
+        # Factory shared with the manager: parallel dag branches each get a FRESH
+        # search agent instance (agents keep per-run memory and are not thread-safe),
+        # configured identically to the primary one.
+        agent = ToolCallingAgent(
+            model=model_search,
+            tools=WEB_TOOLS,
+            max_steps=args.max_steps,
+            verbosity_level=2,
+            planning_interval=search_agent_planning_interval,
+            name="search_agent",
+            description="""A team member that will search the internet to answer your question.
     Ask him for all your questions that require browsing the web.
     Provide him as much context as possible, in particular if you need to search on a specific timeframe!
     And don't hesitate to provide him with a complex search task, like finding a difference between two webpages.
     Your request must be a real sentence, not a google search! Like "Find me this information (...)" rather than a few keywords.
     """,
-        provide_run_summary=True,
-        debug=debug,
-        static_plan=search_agent_static_plan,
-        dynamic_update_plan=args.dynamic_update_plan,
-        # --reflection is a manager-level treatment (adaptive re-planning); it must
-        # not leak into the shared search agent.
-        reflection=False,
-    )
-    text_webbrowser_agent.prompt_templates["managed_agent"]["task"] += """You can navigate to .txt online files.
+            provide_run_summary=True,
+            debug=debug,
+            static_plan=search_agent_static_plan,
+            dynamic_update_plan=args.dynamic_update_plan,
+            # --reflection is a manager-level treatment (adaptive re-planning); it must
+            # not leak into the shared search agent.
+            reflection=False,
+        )
+        agent.prompt_templates["managed_agent"]["task"] += """You can navigate to .txt online files.
     If a non-html page is in another format, especially .pdf or a Youtube video, use tool 'inspect_file_as_text' to inspect it.
     Additionally, if after some searching you find out that you need more information to answer the question, you can use `final_answer` with your request for clarification as argument to request for more information."""
+        return agent
+
+    text_webbrowser_agent = make_search_agent()
 
     # Manager Agent 생성
     manager_agent = CodeAgent(
@@ -302,6 +348,9 @@ def create_agent_hierarchy(model: Model, model_search: Model, args, debug=False)
         use_long_term_memory=args.use_long_term_memory,
         retrieve_key_memory=args.retrieve_key_memory,
         auto_planning=auto_planning_enabled,
+        parallel_subtasks=not getattr(args, "no_parallel_subtasks", False),
+        managed_agent_factory=lambda: [make_search_agent()],
+        plan_as_prompt=args.plan_as_prompt,
     )
     return manager_agent
 
@@ -481,9 +530,26 @@ Here is the task:
     if args.static_plan:
         planning_mode = "react"
     elif args.subtask:
-        planning_mode = f"{args.subtask_mode}{'_rp' if args.auto_planning else ''}"
+        planning_mode = args.subtask_mode
+        if args.plan_as_prompt:
+            planning_mode += "_prompt"
+        if args.auto_planning:
+            planning_mode += "_rp"
+        elif isinstance(args.planning_interval, int) and args.planning_interval > 0:
+            planning_mode += f"_int{args.planning_interval}"
     else:
         planning_mode = f"interval_{'auto' if args.auto_planning else args.planning_interval}"
+
+    def monitor_tokens(monitored_agent):
+        try:
+            return monitored_agent.monitor.get_total_token_counts()
+        except Exception:
+            return {"input": None, "output": None}
+
+    token_usage = {
+        "manager": monitor_tokens(agent),
+        "search_agent": monitor_tokens(agent.managed_agents["search_agent"]),
+    }
     # 결과 저장 구조
     annotated_example = {
         "agent_name": model.model_id,
@@ -504,6 +570,9 @@ Here is the task:
         "replan_count": getattr(agent, "replan_count", 0),
         "plan_parse_failures": getattr(agent, "plan_parse_failures", 0),
         "subtask_records": getattr(agent, "subtask_records", []),
+        "token_usage": token_usage,
+        "git_commit": getattr(args, "git_commit", None),
+        "run_args": getattr(args, "run_args_snapshot", None),
     }
     append_answer(annotated_example, answers_file, jsonl_lock)
 
@@ -574,6 +643,21 @@ def get_examples_to_answer(
 
 def main():
     args = parse_args()
+    # Provenance: results from different code versions must never be compared, so
+    # every row records the exact commit and the full argument snapshot.
+    try:
+        args.git_commit = (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parent, stderr=subprocess.DEVNULL
+            )
+            .decode()
+            .strip()
+        )
+    except Exception:
+        args.git_commit = None
+    args.run_args_snapshot = {
+        key: value for key, value in vars(args).items() if key not in ("git_commit", "run_args_snapshot")
+    }
     logger.info(f"Starting run with arguments: {args}")
     answers_file = f"output/{args.split}/{args.run_name}.jsonl"
 

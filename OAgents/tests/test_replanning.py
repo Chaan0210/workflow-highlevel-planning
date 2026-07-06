@@ -104,6 +104,35 @@ def test_interval_none_without_auto_planning_plans_once():
     assert model.action_calls == 2
 
 
+def test_fixed_interval_replans_on_schedule():
+    # planning_interval=2 -> plan at steps 1, 3, 5, ... (initial plan + fixed-interval re-plans).
+    model = DummyModel(
+        action_scripts=[
+            "```python\nprint('a')\n```",
+            "```python\nprint('b')\n```",
+            "```python\nprint('c')\n```",
+            "```python\nfinal_answer('done')\n```",
+        ]
+    )
+    agent = CodeAgent(
+        tools=[],
+        model=model,
+        max_steps=6,
+        auto_planning=False,
+        planning_interval=2,
+        verbosity_level=LogLevel.ERROR,
+    )
+
+    final_answer = agent.run("test fixed-interval re-planning")
+    assert final_answer
+
+    plan_steps = [step for step in agent.memory.steps if isinstance(step, PlanningStep)]
+    assert len(plan_steps) == 2, "Plan at step 1 and re-plan at step 3 (answer found at step 4)"
+    assert model.plan_calls == 2
+    assert model.action_calls == 4
+    assert agent.replan_count == 1
+
+
 def test_static_plan_never_plans():
     model = DummyModel(action_scripts=["```python\nfinal_answer('done')\n```"])
     agent = CodeAgent(

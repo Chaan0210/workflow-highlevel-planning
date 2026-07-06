@@ -10,8 +10,10 @@ accuracy, then prints comparative summaries across different planning strategies
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import math
+import re
 import sys
 import textwrap
 from collections import Counter
@@ -136,6 +138,36 @@ def detect_plan_mode(planning_steps: List[dict]) -> Tuple[str, bool, bool, bool]
     return mode, has_dag, has_parallel, has_sections
 
 
+def extract_dag_edges(planning_steps: List[dict]) -> List[Tuple[str, str]]:
+    """Parse ##DAG_LIST edges from the latest plan text that carries one."""
+    edges: List[Tuple[str, str]] = []
+    for step in planning_steps:
+        plan = step.get("plan") or "" if isinstance(step, dict) else ""
+        match = re.search(r"##DAG_LIST\n(.*?)(?=##|\Z)", plan, flags=re.DOTALL)
+        if not match:
+            continue
+        block = re.sub(r"(?<!['\"])(ST\d+)(?!['\"])", r"'\1'", match.group(1).strip())
+        try:
+            parsed = ast.literal_eval(block)
+            edges = [(str(a).strip(), str(b).strip()) for (a, b) in parsed]
+        except Exception:
+            continue
+    return edges
+
+
+def dag_is_chain(edges: List[Tuple[str, str]]) -> bool | None:
+    """True when the dependency graph is a pure chain (every node has at most one
+    predecessor and one successor) — i.e. behaviourally equivalent to sections."""
+    if not edges:
+        return None
+    indegree: Counter = Counter()
+    outdegree: Counter = Counter()
+    for a, b in edges:
+        outdegree[a] += 1
+        indegree[b] += 1
+    return max(outdegree.values()) <= 1 and max(indegree.values()) <= 1
+
+
 def extract_tool_name(call: dict) -> str:
     if not isinstance(call, dict):
         return ""
@@ -231,6 +263,32 @@ def analyze_record(record: dict, run_label: str) -> dict:
     iteration_limit = bool(record.get("iteration_limit_exceeded"))
     agent_error = bool(record.get("agent_error"))
 
+    # Fields recorded by run_gaia.py since the fidelity fix (absent in old files).
+    token_usage = record.get("token_usage") or {}
+
+    def token_count(agent_key: str, kind: str):
+        value = (token_usage.get(agent_key) or {}).get(kind)
+        return value if isinstance(value, (int, float)) else None
+
+    token_parts = [
+        token_count("manager", "input"),
+        token_count("manager", "output"),
+        token_count("search_agent", "input"),
+        token_count("search_agent", "output"),
+    ]
+    total_tokens = sum(part for part in token_parts if part is not None) if any(
+        part is not None for part in token_parts
+    ) else None
+
+    subtask_recs = [entry for entry in (record.get("subtask_records") or []) if isinstance(entry, dict)]
+    subtask_rec_failed = sum(1 for entry in subtask_recs if entry.get("status") == "failed")
+    parallel_batches = {
+        tuple(entry.get("parallel_batch") or [])
+        for entry in subtask_recs
+        if len(entry.get("parallel_batch") or []) > 1
+    }
+    dag_edges = extract_dag_edges(planning_steps)
+
     if correct:
         error_category = "correct"
     elif agent_error:
@@ -288,6 +346,21 @@ def analyze_record(record: dict, run_label: str) -> dict:
         "error_category": error_category,
         "correct": correct,
         "close_call": close_call,
+        "recorded_planning_mode": record.get("planning_mode"),
+        "recorded_replan_count": record.get("replan_count"),
+        "plan_parse_failures": record.get("plan_parse_failures"),
+        "manager_input_tokens": token_count("manager", "input"),
+        "manager_output_tokens": token_count("manager", "output"),
+        "search_input_tokens": token_count("search_agent", "input"),
+        "search_output_tokens": token_count("search_agent", "output"),
+        "total_tokens": total_tokens,
+        "subtask_rec_total": len(subtask_recs),
+        "subtask_rec_failed": subtask_rec_failed,
+        "used_parallel_batch": bool(parallel_batches),
+        "parallel_batch_count": len(parallel_batches),
+        "dag_edge_count": len(dag_edges),
+        "dag_is_chain": dag_is_chain(dag_edges),
+        "git_commit": record.get("git_commit"),
     }
 
 
@@ -315,6 +388,18 @@ def build_run_summary(rows: List[dict], run_label: str, run_path: Path) -> Tuple
             }
 
     failure_breakdown = df["error_category"].value_counts().to_dict() if "error_category" in df else {}
+
+    def numeric_series(column: str) -> pd.Series:
+        if column not in df:
+            return pd.Series(dtype=float)
+        return pd.to_numeric(df[column], errors="coerce").dropna()
+
+    recorded_replans = numeric_series("recorded_replan_count")
+    parse_failures = numeric_series("plan_parse_failures")
+    total_tokens = numeric_series("total_tokens")
+    dag_rows = df[df["dag_edge_count"] > 0] if "dag_edge_count" in df else pd.DataFrame()
+    dag_chain_flags = dag_rows["dag_is_chain"].dropna() if not dag_rows.empty else pd.Series(dtype=object)
+
     summary = {
         "run_label": run_label,
         "file": str(run_path),
@@ -346,6 +431,20 @@ def build_run_summary(rows: List[dict], run_label: str, run_path: Path) -> Tuple
         "failure_breakdown": failure_breakdown,
         "wrong_task_ids": df.loc[~df["correct"], "task_id"].dropna().tolist(),
         "auto_plan_share": float((df["plan_mode"] == "dag").mean()) if "plan_mode" in df else 0.0,
+        # Manipulation-check aggregates (None when the fields are absent, e.g. old files).
+        "recorded_modes": (
+            df["recorded_planning_mode"].dropna().value_counts().to_dict()
+            if "recorded_planning_mode" in df
+            else {}
+        ),
+        "git_commits": sorted(df["git_commit"].dropna().unique().tolist()) if "git_commit" in df else [],
+        "avg_recorded_replans": float(recorded_replans.mean()) if not recorded_replans.empty else None,
+        "recorded_replanned_pct": float((recorded_replans > 0).mean()) if not recorded_replans.empty else None,
+        "plan_parse_failure_rate": float((parse_failures > 0).mean()) if not parse_failures.empty else None,
+        "avg_total_tokens": float(total_tokens.mean()) if not total_tokens.empty else None,
+        "parallel_batch_rate": float(df["used_parallel_batch"].mean()) if "used_parallel_batch" in df else None,
+        "dag_planned_tasks": int(len(dag_rows)),
+        "dag_chain_rate": float(dag_chain_flags.astype(bool).mean()) if not dag_chain_flags.empty else None,
     }
     return summary, df
 
@@ -409,6 +508,34 @@ def print_run_summary(summary: dict, df: pd.DataFrame, top_tools: int, incorrect
             )
         print("\nLevel breakdown:")
         print(pd.DataFrame(level_rows).to_string(index=False))
+    def fmt(value, pct=False):
+        if value is None:
+            return "n/a"
+        return f"{value * 100:.1f}%" if pct else f"{value:.2f}"
+
+    print("\nManipulation checks:")
+    commits = summary.get("git_commits") or []
+    print(
+        f" - recorded mode(s): {summary.get('recorded_modes') or 'n/a'} "
+        f"| commit(s): {[c[:8] for c in commits] or 'n/a'}"
+    )
+    if len(commits) > 1:
+        print(" - ⚠️  MIXED COMMITS inside one result file — rows are not comparable!")
+    print(
+        f" - recorded re-plans: avg {fmt(summary['avg_recorded_replans'])} "
+        f"(fired on {fmt(summary['recorded_replanned_pct'], pct=True)} of tasks) "
+        f"| plan parse failures on {fmt(summary['plan_parse_failure_rate'], pct=True)} of tasks"
+    )
+    if summary["dag_planned_tasks"]:
+        print(
+            f" - dag structure: {summary['dag_planned_tasks']} task(s) with edges, "
+            f"chain-shaped {fmt(summary['dag_chain_rate'], pct=True)} "
+            f"(a high chain rate means dag ≈ sections in practice) "
+            f"| parallel batches used on {fmt(summary['parallel_batch_rate'], pct=True)} of tasks"
+        )
+    tokens = summary["avg_total_tokens"]
+    print(f" - avg tokens/task (manager+search, in+out): {'n/a' if tokens is None else format(tokens, ',.0f')}")
+
     print("\nTop manager tools:", format_counter(summary["tool_call_counter"], top_tools))
     print("Top search tools:", format_counter(summary["search_tool_call_counter"], top_tools))
     if summary["failure_breakdown"]:

@@ -21,6 +21,52 @@
 n=30/레벨이면 95% CI가 ±18%p까지 벌어진다. McNemar p가 유의하지 않은 차이는 노이즈로 취급하고,
 가능하면 레벨당 문제 수를 늘리거나 반복 실행으로 페어드 비교를 강화할 것.
 
+#### 2차 보강 (같은 날, 동일 브랜치)
+
+8. **채점 정규화**: 수치 정답에 단위/표현이 붙은 예측("0.1777 m^3", "approximately 42")은
+   숫자 토큰 추출로 정규화해 채점한다(`gaia_scorer.normalize_number_str`). 문자열/리스트 채점 의미론은 GAIA 공식 그대로.
+9. **샌드박스 보강**: AUTHORIZED_IMPORTS에 표준 텍스트·데이터 모듈과 xlsx/docx 리더(openpyxl, docx)를 추가.
+   서브태스크 실행기가 "짧고 단순한 코드 + 웹은 팀원에게 위임"을 명시적으로 지시.
+10. **DAG 실제 병렬 실행**: 의존성이 해소된 ready set을 스레드로 **동시 실행**(배치당 최대 4 워커, 스텝 1개 소비).
+    브랜치는 독립 인터프리터 + 독립 search_agent 인스턴스(팩토리 생성)로 상태를 격리하고, 결과는 우선순위 순서로 결정적으로 병합.
+    끄려면 `--no_parallel_subtasks`.
+11. **측정 보강**: 결과 행에 `git_commit`/`run_args`/`token_usage`(매니저·검색 in/out)를 기록.
+    `analyze_gaia_results.py`가 조작 점검 블록(기록된 모드, 재플랜 발동율, 플랜 파싱 실패율,
+    **체인형 DAG 비율**(높으면 dag≈sections), 병렬 배치 사용율, 태스크당 토큰)을 출력하고 혼합 커밋을 경고.
+12. **추가 실험 암**:
+    - **고정간격 재플래닝**: `--subtask --subtask_mode sections --planning_interval 5` → 스텝 1, 6, 11…에서 재플랜.
+      적응적(auto) 재플래닝의 이득이 "적응성"에서 오는지 "그냥 자주 재플랜"에서 오는지 분리.
+    - **플랜-as-프롬프트**: `--subtask --subtask_mode sections --planning_interval 0 --plan_as_prompt` →
+      플랜을 생성해 [PLAN] 컨텍스트로만 쓰고 실행은 일반 ReAct.
+      "플랜=제어 흐름" vs "플랜=가이드"를 분리하는 ablation.
+
+```
+# 6. ----------------- Fixed-interval Re-planning (ablation) -----------------
+python run_gaia.py \
+  --concurrency 10 \
+  --model_id gpt-5 --model_id_search gpt-5 \
+  --run_name gpt5-gaia-l1-30-pta-int5-YYYY-MM-DD \
+  --level 1 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
+  --max_steps 20 \
+  --search_tool_reflection \
+  --subtask --subtask_mode sections \
+  --planning_interval 5 \
+  --search_agent_plan_once
+
+# 7. ----------------- Plan-as-Prompt (ablation) -----------------
+python run_gaia.py \
+  --concurrency 10 \
+  --model_id gpt-5 --model_id_search gpt-5 \
+  --run_name gpt5-gaia-l1-30-pta-prompt-YYYY-MM-DD \
+  --level 1 --selected-tasks $(seq 0 29 | tr '\n' ' ') \
+  --max_steps 20 \
+  --search_tool_reflection \
+  --subtask --subtask_mode sections \
+  --planning_interval 0 \
+  --search_agent_plan_once \
+  --plan_as_prompt
+```
+
 ### GAIA benchmark 실험
 
 ```
